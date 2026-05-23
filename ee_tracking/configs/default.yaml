@@ -2,36 +2,39 @@ env:
   control_hz: 50.0
   episode_seconds: 6.0
   randomize_trajectory: true
-  trajectory_pool: ["circle", "figure8", "moving_target"]
-  residual_scale: 0.2          # smaller corrections — IK handles the bulk
+  trajectory_pool: ["moving_target"]   # focus on the hard case; add others once residual beats IK here
+  residual_scale: 0.05                 # was 0.4 — trim, don't compete with IK
   use_residual: true
-  w_pos: 1.0
+  w_pos: 0.7                           # absolute position error
   w_vel: 0.05
-  w_residual: 0.10             # discourage gratuitous residual when IK is enough
+  w_residual: 0.5                      # was 0.1 — strong cost on gratuitous corrections
   w_jerk: 0.01
   w_smooth: 0.05
+  w_delta_pos: 0.3                     # reward improvement over previous step (0=off)
+  w_bonus: 0.5
+  bonus_sharpness: 50.0
   fail_pos_err: 0.30
   lookahead_horizon: 5
   lookahead_dt: 0.10
   disturbance:
-    obs_pos_noise: 0.008     # 8mm Gaussian noise on measured EE (now affects IK)
-    obs_jnt_noise: 0.002     # ~0.1deg joint noise
-    act_delay: 2             # two control steps (~40ms) of action delay
+    obs_pos_noise: 0.005               # 5mm — enough to matter, not so much it drowns signal
+    obs_jnt_noise: 0.002
+    act_delay: 1                       # 1 step = 20ms
 
 train:
-  total_timesteps: 400000
-  n_envs: 8
+  total_timesteps: 1_500_000
+  n_envs: 32
   policy: "MlpPolicy"
   policy_kwargs:
-    net_arch: [128, 128]
+    net_arch: [256, 256]
   learning_rate: 0.0003
-  n_steps: 1024
-  batch_size: 256
+  n_steps: 2048
+  batch_size: 512
   n_epochs: 10
   gamma: 0.97
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.0
+  ent_coef: 0.01
   vf_coef: 0.5
   max_grad_norm: 0.5
   seed: 0
