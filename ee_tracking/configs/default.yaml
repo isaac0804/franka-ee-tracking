@@ -1,0 +1,37 @@
+env:
+  control_hz: 50.0
+  episode_seconds: 6.0
+  randomize_trajectory: true
+  trajectory_pool: ["circle", "figure8", "moving_target"]
+  residual_scale: 0.2          # smaller corrections — IK handles the bulk
+  use_residual: true
+  w_pos: 1.0
+  w_vel: 0.05
+  w_residual: 0.10             # discourage gratuitous residual when IK is enough
+  w_jerk: 0.01
+  w_smooth: 0.05
+  fail_pos_err: 0.30
+  lookahead_horizon: 5
+  lookahead_dt: 0.10
+  disturbance:
+    obs_pos_noise: 0.008     # 8mm Gaussian noise on measured EE (now affects IK)
+    obs_jnt_noise: 0.002     # ~0.1deg joint noise
+    act_delay: 2             # two control steps (~40ms) of action delay
+
+train:
+  total_timesteps: 400000
+  n_envs: 8
+  policy: "MlpPolicy"
+  policy_kwargs:
+    net_arch: [128, 128]
+  learning_rate: 0.0003
+  n_steps: 1024
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.97
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  seed: 0

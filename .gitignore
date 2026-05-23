@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+results/ppo_residual/tb/
+results/ppo_residual/checkpoints/
+results/*/train_log.txt
+assets/mujoco_menagerie/
+.DS_Store
