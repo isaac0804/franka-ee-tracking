@@ -6,11 +6,13 @@ Usage:
     python train.py --config ee_tracking/configs/default.yaml --out results/run1
     python train.py --timesteps 3000000 --out results/run2
 
-Key fixes vs prior run:
-    residual_scale  0.05  (was 0.4) — residual trims IK, doesn't overpower it
-    w_residual      0.5   (was 0.1) — strong deterrent against gratuitous corrections
-    w_delta_pos     0.3   (was 0.0) — reward step-over-step improvement, not just abs error
-    trajectory_pool moving_target only — maximise gradient signal on the hard case
+Key design choices (see default.yaml for current values):
+    residual_scale  0.05 rad/s — residual trims IK, doesn't compete with it
+    w_residual      0.5  — soft constraint keeping corrections small
+    action_filter_hz 2.0 — 2nd-order Butterworth baked into env; policy trains
+                           against its own filtered output (+10% vs IK post-hoc)
+    trajectory_pool moving_target only — maximise gradient on the hard case
+    w_delta_pos / w_bonus  both off — too noisy / dominated pos signal in practice
 """
 from __future__ import annotations
 

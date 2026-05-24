@@ -1,22 +1,37 @@
 """Franka end-effector tracking environment with a residual-RL action space.
 
-Action: 7-D residual joint-velocity, added to the analytic IK command:
-    q_dot_total = ik(state, target) + alpha * residual
-The integrated setpoint `q_set` is then sent to the position actuators.
+Architecture
+------------
+The policy outputs a 7-D normalised action in [-1, 1].  A 2nd-order
+Butterworth low-pass (configurable, default 2 Hz) is applied first to
+suppress step-to-step action noise; the filtered signal is then scaled
+by `residual_scale` (rad/s units) and applied as a *non-accumulating*
+position offset on top of the IK setpoint:
 
-This formulation means an untrained policy already tracks reasonably
-well — the policy's job is to compensate for what IK can't model
-(observation noise, control delay, near-singular geometry).
+    IK setpoint (integrates freely every step, never touched by residual):
+        q_ik(t) = q_ik(t-1) + ik_qdot(t) * dt
 
-Observation (per step):
-    [ q (7),
-      qdot (7),
-      ee_pos (3),
-      ee_pos_error (3),                       # measured target - measured ee
-      target_vel (3),
-      ik_qdot (7),                            # what the baseline IK wants
-      lookahead positions (3 * horizon),
-      residual_history (7 * max(1, act_delay)) ]  # all pending residuals in delay buffer
+    Total setpoint sent to position actuators:
+        q_set(t) = clip(q_ik(t) + filter(action(t)) * residual_scale * dt, limits)
+
+Because the residual is a one-step offset rather than an integrated
+velocity, a wrong correction at step t is fully self-correcting at t+1
+without IK needing to fight accumulated drift.  An untrained policy
+(action ≈ 0) degrades gracefully to pure IK.
+
+The policy's job is to compensate for what IK cannot model: observation
+noise, the one-step action delay, and near-singular Jacobian geometry.
+
+Observation (per step, total dim = 7+7+3+3+3+7 + 3*horizon + 7*max(1,delay) + len(pool))
+    q                  (7)   — joint positions (noisy)
+    qdot               (7)   — joint velocities
+    ee_pos             (3)   — measured EE position (noisy)
+    ee_pos_error       (3)   — target - measured EE
+    target_vel         (3)   — desired EE velocity
+    ik_qdot            (7)   — IK joint-velocity command
+    lookahead_pos  (3*H)     — future target positions at lookahead_dt intervals
+    residual_history (7*D)   — pending filtered residuals in delay buffer
+    traj_onehot    (|pool|)  — one-hot trajectory type (reduces critic variance)
 """
 
 from __future__ import annotations
@@ -42,48 +57,67 @@ DEFAULT_SCENE = str(ASSETS_DIR / "scene.xml")
 
 @dataclass
 class EnvConfig:
+    """Environment configuration.
+
+    The field defaults below are bare fallbacks used only when no YAML
+    config is provided (e.g. in unit tests).  For actual training use
+    ee_tracking/configs/default.yaml, which overrides the tuned values.
+    Significant divergences from the YAML are flagged inline.
+    """
     scene_xml: str = DEFAULT_SCENE
-    control_hz: float = 50.0          # policy decision rate
-    episode_seconds: float = 6.0      # one full trajectory pass
+    control_hz: float = 50.0           # policy decision rate (Hz)
+    episode_seconds: float = 6.0       # one full trajectory pass
     trajectory: str = "circle"
     trajectory_kwargs: dict = field(default_factory=dict)
-    randomize_trajectory: bool = True # sample from a set at reset
+    randomize_trajectory: bool = True  # sample from pool at each reset
+    # yaml default: ["moving_target"] — pool kept narrow to maximise gradient
     trajectory_pool: tuple = ("circle", "figure8", "moving_target")
-    # action shaping
-    residual_scale: float = 0.4       # rad/s — max contribution of residual
-    use_residual: bool = True         # if False, IK-only (for ablation)
-    # reward weights
-    w_pos: float = 1.0
-    w_vel: float = 0.05
-    w_residual: float = 0.02
-    w_jerk: float = 0.005
-    w_smooth: float = 0.02
-    # delta-pos reward: bonus for *reducing* pos_err relative to previous step.
-    # Replaces absolute r_pos when w_delta_pos > 0. Eliminates trajectory-driven
-    # baseline noise (std ~10mm) so only the policy's contribution to error change
-    # is rewarded. Set w_pos=0 when using this.
+
+    # ── action shaping ────────────────────────────────────────────────────
+    # yaml default: 0.05 rad/s — residual trims IK, doesn't compete with it
+    residual_scale: float = 0.4        # rad/s — max per-joint residual velocity
+    use_residual: bool = True          # False → IK-only ablation
+
+    # ── reward weights ────────────────────────────────────────────────────
+    # yaml defaults differ significantly; see default.yaml for tuned values
+    w_pos: float = 5.0                 # L1 position error weight (dominant term)
+    w_vel: float = 0.1                 # EE velocity error
+    w_residual: float = 0.5            # penalty on ||residual||² (keeps corrections small)
+    w_jerk: float = 0.001              # EE acceleration² (regulariser only)
+    w_smooth: float = 0.05             # penalty on step-to-step residual change
+    # delta-pos reward: positive when error decreases vs previous step.
+    # Eliminates trajectory-driven baseline noise; set w_pos=0 when using.
+    # Off by default — too noisy on the slow random-walk moving_target.
     w_delta_pos: float = 0.0
-    # bonus: 0.5 * exp(-bonus_sharpness * ||pos_err||^2)
-    # set bonus_sharpness=0.0 to disable entirely
-    w_bonus: float = 0.5
-    bonus_sharpness: float = 50.0
-    # termination
-    fail_pos_err: float = 0.30        # m — bail if the EE blows up
-    # disturbances
+    # proximity bonus: w_bonus * exp(-sharpness * ||pos_err||²)
+    # Off by default — was 55× larger than pos term in early runs, killed gradient.
+    w_bonus: float = 0.0
+    bonus_sharpness: float = 0.0
+
+    # ── termination ───────────────────────────────────────────────────────
+    fail_pos_err: float = 0.30         # m — bail if EE error exceeds this
+
+    # ── disturbances ──────────────────────────────────────────────────────
     disturbance: DisturbanceConfig = field(default_factory=DisturbanceConfig)
-    # rng
+
+    # ── rng ───────────────────────────────────────────────────────────────
     seed: int = 0
-    # observation
-    lookahead_horizon: int = 5
-    lookahead_dt: float = 0.10
-    # blend the trajectory in from the home pose over this many seconds
-    # (prevents a step in the desired position at t=0).
+
+    # ── observation ───────────────────────────────────────────────────────
+    lookahead_horizon: int = 5         # number of future target positions in obs
+    lookahead_dt: float = 0.10         # time between lookahead samples (s)
+
+    # ── trajectory blend-in ───────────────────────────────────────────────
+    # Smoothstep blend from home pose to trajectory over this many seconds.
+    # Prevents a position step at t=0 that IK would have to chase.
     ramp_in_seconds: float = 0.5
-    # action smoothing — 2nd-order Butterworth low-pass on raw policy output.
-    # Baked into the env so the policy trains against its own smoothed output and
-    # the obs residual-history reflects what the robot actually executed.
-    # 0.0 = off.  2.0 Hz ≈ 62 ms half-life; optimal from post-hoc sweep and
-    # strictly better than EMA at the same cutoff (+2% across all tested models).
+
+    # ── action smoothing ──────────────────────────────────────────────────
+    # 2nd-order Butterworth applied to raw policy output before execution.
+    # Baked into the env so the policy trains against its own filtered output
+    # and _residual_history reflects what the robot actually executed.
+    # 0.0 = off.  2.0 Hz: +10% vs IK in post-hoc eval (vs +8% for EMA).
+    # yaml default: 2.0
     action_filter_hz: float = 0.0
 
 
