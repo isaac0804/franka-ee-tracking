@@ -46,7 +46,7 @@ BASE = {
         "fail_pos_err": 0.30,
         "lookahead_horizon": 5,
         "lookahead_dt": 0.10,
-        "action_ema": 0.2,
+        "action_filter_hz": 2.0,
         "disturbance": {
             "obs_pos_noise": 0.005,
             "obs_jnt_noise": 0.002,

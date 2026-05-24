@@ -52,7 +52,7 @@ def _env_kwargs_from_cfg(saved_cfg: dict) -> dict:
         trajectory_pool=tuple(env.get("trajectory_pool", ["moving_target"])),
         lookahead_horizon=int(env.get("lookahead_horizon", 5)),
         lookahead_dt=float(env.get("lookahead_dt", 0.10)),
-        action_ema=float(env.get("action_ema", 1.0)),
+        action_filter_hz=float(env.get("action_filter_hz", 0.0)),
         disturbance=DisturbanceConfig(
             obs_pos_noise=float(dist.get("obs_pos_noise", 0.005)),
             obs_jnt_noise=float(dist.get("obs_jnt_noise", 0.002)),
@@ -123,7 +123,7 @@ def _eval_config(
     trajectory_pool: tuple = ("moving_target",),
     lookahead_horizon: int = 5,
     lookahead_dt: float = 0.10,
-    action_ema: float = 1.0,
+    action_filter_hz: float = 0.0,
     disturbance: DisturbanceConfig | None = None,
 ) -> EnvConfig:
     return EnvConfig(
@@ -135,7 +135,7 @@ def _eval_config(
         seed=seed,
         lookahead_horizon=lookahead_horizon,
         lookahead_dt=lookahead_dt,
-        action_ema=action_ema,
+        action_filter_hz=action_filter_hz,
     )
 
 
@@ -147,7 +147,7 @@ def run_residual(
     trajectory_pool: tuple = ("moving_target",),
     lookahead_horizon: int = 5,
     lookahead_dt: float = 0.10,
-    action_ema: float = 1.0,
+    action_filter_hz: float = 0.0,
     disturbance: DisturbanceConfig | None = None,
     action_ema_posthoc: float = 1.0,
 ) -> dict:
@@ -156,20 +156,19 @@ def run_residual(
     All env kwargs must match the training config so the obs dim aligns with
     the loaded model / VecNormalize statistics.
 
-    action_ema: restored from training config — the baked-in EMA the env applies
-        internally.  Passed through to EnvConfig; do not set this manually.
+    action_filter_hz: restored from training config — the baked-in Butterworth
+        cutoff the env applies internally.  Do not set manually.
 
-    action_ema_posthoc: additional EMA applied at inference time, BEFORE the
-        env sees the action.  Use only for post-hoc experiments on models that
-        were trained without baked EMA (action_ema=1.0).  Setting this on a
-        baked-EMA model causes double-smoothing.  Default 1.0 = off.
+    action_ema_posthoc: additional EMA applied at inference time before the env
+        sees the action.  For post-hoc experiments on models trained without a
+        baked filter (action_filter_hz=0).  Default 1.0 = off.
     """
     cfg = _eval_config(
         trajectory, use_residual=True, seed=seed,
         trajectory_pool=trajectory_pool,
         lookahead_horizon=lookahead_horizon,
         lookahead_dt=lookahead_dt,
-        action_ema=action_ema,
+        action_filter_hz=action_filter_hz,
         disturbance=disturbance,
     )
     env = FrankaTrackingEnv(cfg)
@@ -326,7 +325,7 @@ def cmd_rollout(args):
     env_kwargs = _env_kwargs_from_cfg(saved_cfg)
     traj = args.trajectory
     posthoc_ema = args.action_ema
-    print(f"rollout: {traj} (residual policy, baked_ema={env_kwargs['action_ema']}, posthoc_ema={posthoc_ema}) ...")
+    print(f"rollout: {traj} (residual policy, baked_hz={env_kwargs['action_filter_hz']}, posthoc_ema={posthoc_ema}) ...")
     result = run_residual(model, vn_ref, traj, action_ema_posthoc=posthoc_ema, **env_kwargs)
 
     print(json.dumps(_strip_arrays(result), indent=2))
@@ -347,7 +346,7 @@ def cmd_ablation(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    baked = env_kwargs["action_ema"]
+    baked = env_kwargs["action_filter_hz"]
     ema_tag = f"  [baked={baked}" + (f", posthoc={posthoc_ema}]" if posthoc_ema < 1.0 else "]")
     results = {}
     print(f"\n{'trajectory':<16} {'IK (mm)':>10} {'residual (mm)':>14} {'Δ':>8}{ema_tag}")

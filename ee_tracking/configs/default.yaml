@@ -16,7 +16,7 @@ env:
   fail_pos_err: 0.30
   lookahead_horizon: 5
   lookahead_dt: 0.10
-  action_ema: 0.2                     # EMA on policy output (~62ms half-life); optimal from post-hoc sweep
+  action_filter_hz: 2.0               # 2nd-order Butterworth on policy output; +10% over IK vs +8% for EMA
   disturbance:
     obs_pos_noise: 0.005               # 5mm — enough to matter, not so much it drowns signal
     obs_jnt_noise: 0.002
