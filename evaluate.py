@@ -28,7 +28,7 @@ from ee_tracking.env.disturbances import DisturbanceConfig
 ALL_TRAJECTORIES = ["moving_target", "circle", "figure8", "unreachable"]
 
 # Fallback disturbance when no saved config is available.
-_DEFAULT_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, act_delay=1)
+_DEFAULT_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, cmd_delay=5)
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ def _env_kwargs_from_cfg(saved_cfg: dict) -> dict:
     Affected obs dimensions:
       - trajectory_pool  → one-hot length
       - lookahead_horizon → 3 * horizon elements
-      - act_delay        → 7 * max(1, delay) residual-history elements
+      - cmd_delay        → 7 * max(1, delay) cmd-delta-history elements
     """
     env = saved_cfg.get("env", {})
     dist = env.get("disturbance", {})
@@ -56,7 +56,8 @@ def _env_kwargs_from_cfg(saved_cfg: dict) -> dict:
         disturbance=DisturbanceConfig(
             obs_pos_noise=float(dist.get("obs_pos_noise", 0.005)),
             obs_jnt_noise=float(dist.get("obs_jnt_noise", 0.002)),
-            act_delay=int(dist.get("act_delay", 1)),
+            # cmd_delay is new name; fall back to act_delay for old saved configs
+            cmd_delay=int(dist.get("cmd_delay", dist.get("act_delay", 5))),
         ),
     )
 

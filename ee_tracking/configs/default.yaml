@@ -3,24 +3,25 @@ env:
   episode_seconds: 6.0
   randomize_trajectory: true
   trajectory_pool: ["moving_target"]   # focus on the hard case; add others once residual beats IK here
-  residual_scale: 0.05                 # was 0.4 — trim, don't compete with IK
+  residual_scale: 0.05                 # rad/s — residual trims IK, doesn't compete with it
   use_residual: true
-  w_pos: 5.0                           # L1 pos error (m) — dominant term, ~-0.15/step at 30mm
+  w_pos: 5.0                           # L1 pos error (m) — dominant term
   w_vel: 0.1
-  w_residual: 0.5                      # soft constraint (~10% of pos signal at 30mm)
-  w_jerk: 0.001                        # regulariser only — was equal to pos term, too strong
+  w_residual: 0.5                      # soft constraint keeping corrections small
+  w_jerk: 0.001
   w_smooth: 0.05
-  w_delta_pos: 0.0                     # off — too noisy vs slow random walk
-  w_bonus: 0.0                         # off — was 55x larger than pos term, killed gradient
+  w_delta_pos: 0.0
+  w_bonus: 0.0
   bonus_sharpness: 0.0
   fail_pos_err: 0.30
-  lookahead_horizon: 5
-  lookahead_dt: 0.10
-  action_filter_hz: 2.0               # 2nd-order Butterworth on policy output; +10% over IK vs +8% for EMA
+  lookahead_horizon: 5                 # future target positions in obs; covers delay window (5 steps = 100ms)
+  lookahead_dt: 0.10                   # spacing between lookahead samples (s)
+  action_filter_hz: 2.0               # 2nd-order Butterworth on policy output
   disturbance:
-    obs_pos_noise: 0.005               # 5mm — enough to matter, not so much it drowns signal
+    obs_pos_noise: 0.005               # 5mm — realistic EE measurement noise
     obs_jnt_noise: 0.002
-    act_delay: 1                       # 1 step = 20ms
+    cmd_delay: 5                       # 5 steps = 100ms total pipeline delay (IK + residual, equal footing)
+                                       # IK cannot compensate without prediction; policy can via lookahead
 
 train:
   total_timesteps: 1_500_000

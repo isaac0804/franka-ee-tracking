@@ -50,7 +50,7 @@ BASE = {
         "disturbance": {
             "obs_pos_noise": 0.005,
             "obs_jnt_noise": 0.002,
-            "act_delay": 1,
+            "cmd_delay": 5,   # 100 ms whole-pipeline delay (IK + residual equally)
         },
     },
     "train": {
@@ -125,11 +125,14 @@ CONFIGS: list[tuple[str, dict, dict]] = [
     ("look_far",        {"lookahead_horizon": 8, "lookahead_dt": 0.10}, {}),  # 0.8 s ahead
     ("look_wide",       {"lookahead_horizon": 5, "lookahead_dt": 0.20}, {}),  # 1.0 s ahead
 
-    # ── G5: action delay ─────────────────────────────────────────────────
-    # delay=0: IK is perfect reactive — lookahead has less value
-    # delay=2: harder for IK, more room for residual to compensate
-    ("delay_0",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "act_delay": 0}}, {}),
-    ("delay_2",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "act_delay": 2}}, {}),
+    # ── G5: command delay ────────────────────────────────────────────────
+    # Baseline is cmd_delay=5 (100 ms).  Ablate to understand sensitivity.
+    # delay=0: IK is reactive — no delay advantage for lookahead
+    # delay=3: 60 ms — IK degrades to ~32 mm; residual has moderate room
+    # delay=8: 160 ms — extreme delay; tests policy's prediction horizon
+    ("delay_0",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "cmd_delay": 0}}, {}),
+    ("delay_3",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "cmd_delay": 3}}, {}),
+    ("delay_8",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "cmd_delay": 8}}, {}),
 
     # ── G6: reward weights ───────────────────────────────────────────────
     ("wpos_3",          {"w_pos": 3.0},   {}),

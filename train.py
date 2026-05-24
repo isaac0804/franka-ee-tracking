@@ -7,11 +7,16 @@ Usage:
     python train.py --timesteps 3000000 --out results/run2
 
 Key design choices (see default.yaml for current values):
+    cmd_delay       5 steps (100 ms) — whole-pipeline delay applied to total
+                    q_setpoint; IK and residual travel through the same FIFO,
+                    so the only way to beat IK is to predict using lookahead
     residual_scale  0.05 rad/s — residual trims IK, doesn't compete with it
     w_residual      0.5  — soft constraint keeping corrections small
     action_filter_hz 2.0 — 2nd-order Butterworth baked into env; policy trains
-                           against its own filtered output (+10% vs IK post-hoc)
-    trajectory_pool moving_target only — maximise gradient on the hard case
+                           against its own filtered output
+    trajectory_pool moving_target only — maximise gradient on the hard case;
+                    IK degrades from ~18 mm to ~44 mm under 100 ms delay,
+                    giving the residual a large, learnable correction signal
     w_delta_pos / w_bonus  both off — too noisy / dominated pos signal in practice
 """
 from __future__ import annotations
@@ -63,7 +68,8 @@ def env_config_from_dict(d: dict) -> EnvConfig:
         disturbance=DisturbanceConfig(
             obs_pos_noise=dist.get("obs_pos_noise", 0.005),
             obs_jnt_noise=dist.get("obs_jnt_noise", 0.002),
-            act_delay=dist.get("act_delay", 1),
+            # cmd_delay is the new name; fall back to act_delay for old configs
+            cmd_delay=dist.get("cmd_delay", dist.get("act_delay", 5)),
         ),
         seed=d.get("seed", 0),
     )

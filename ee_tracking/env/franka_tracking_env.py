@@ -2,36 +2,39 @@
 
 Architecture
 ------------
-The policy outputs a 7-D normalised action in [-1, 1].  A 2nd-order
-Butterworth low-pass (configurable, default 2 Hz) is applied first to
-suppress step-to-step action noise; the filtered signal is then scaled
-by `residual_scale` (rad/s units) and applied as a *non-accumulating*
-position offset on top of the IK setpoint:
+The policy outputs a 7-D normalised action in [-1, 1].  An optional 2nd-order
+Butterworth low-pass filters the raw action to suppress step-to-step noise;
+the filtered signal is scaled by `residual_scale` (rad/s) and added as a
+*non-accumulating* position offset on top of the IK setpoint.  The combined
+command is then passed through a whole-pipeline delay buffer:
 
     IK setpoint (integrates freely every step, never touched by residual):
-        q_ik(t) = q_ik(t-1) + ik_qdot(t) * dt
+        q_ik(t)  = q_ik(t-1) + ik_qdot(t) * dt
 
-    Total setpoint sent to position actuators:
+    Desired setpoint (IK + residual offset, clipped to joint limits):
         q_set(t) = clip(q_ik(t) + filter(action(t)) * residual_scale * dt, limits)
 
-Because the residual is a one-step offset rather than an integrated
-velocity, a wrong correction at step t is fully self-correcting at t+1
-without IK needing to fight accumulated drift.  An untrained policy
-(action ≈ 0) degrades gracefully to pure IK.
+    Command actually sent to the robot (delayed by cmd_delay steps):
+        ctrl(t)  = q_set(t - cmd_delay)
 
-The policy's job is to compensate for what IK cannot model: observation
-noise, the one-step action delay, and near-singular Jacobian geometry.
+The delay models the full sensor-to-actuator round-trip (network + controller
+loop).  Both IK and residual travel through the same delay, so pure IK has no
+advantage — the only way for the policy to beat IK is to use the lookahead in
+its observation to *predict* where the target will be in cmd_delay steps and
+pre-position accordingly.  An untrained policy (action ≈ 0) degrades to IK
+with delay, which is the hardest IK baseline.
 
-Observation (per step, total dim = 7+7+3+3+3+7 + 3*horizon + 7*max(1,delay) + len(pool))
-    q                  (7)   — joint positions (noisy)
-    qdot               (7)   — joint velocities
-    ee_pos             (3)   — measured EE position (noisy)
-    ee_pos_error       (3)   — target - measured EE
-    target_vel         (3)   — desired EE velocity
-    ik_qdot            (7)   — IK joint-velocity command
-    lookahead_pos  (3*H)     — future target positions at lookahead_dt intervals
-    residual_history (7*D)   — pending filtered residuals in delay buffer
-    traj_onehot    (|pool|)  — one-hot trajectory type (reduces critic variance)
+Observation (per step, total dim = 7+7+3+3+3+7 + 3*H + 7*D + |pool|)
+    q                   (7)   — joint positions (noisy)
+    qdot                (7)   — joint velocities
+    ee_pos              (3)   — measured EE position (noisy)
+    ee_pos_error        (3)   — target - measured EE
+    target_vel          (3)   — desired EE velocity
+    ik_qdot             (7)   — IK joint-velocity command (current step)
+    lookahead_pos   (3*H)     — future target positions at lookahead_dt intervals
+    cmd_delta_hist  (7*D)     — pending setpoints minus current q (oldest→newest)
+                               tells the policy what movement is already queued
+    traj_onehot    (|pool|)   — one-hot trajectory type (reduces critic variance)
 """
 
 from __future__ import annotations
@@ -167,14 +170,19 @@ class FrankaTrackingEnv(gym.Env):
         self._prev_ee_pos = np.zeros(3)
         self._prev_ee_vel = np.zeros(3)
         self._prev_pos_err: float = 0.0
-        # History of residuals in the action delay buffer.
+        self._prev_residual = np.zeros(7)
+        # History of desired setpoints in the command delay buffer.
         # We need act_delay entries so the policy can observe every pending
         # residual that has been sent but not yet executed — restoring the
         # Markov property under delayed execution.
-        self._residual_history_len = max(1, self.cfg.disturbance.act_delay)
-        self._residual_history: deque[np.ndarray] = deque(
-            [np.zeros(7)] * self._residual_history_len,
-            maxlen=self._residual_history_len,
+        # cmd_delta_history: the D most recent desired setpoints (q_set) minus
+        # the current joint positions.  Exposes what movement is "in flight"
+        # inside the delay buffer so the policy can reason about queued commands.
+        # Initialised to zeros at construction; reset() fills with home-q deltas.
+        self._cmd_history_len = max(1, self.cfg.disturbance.cmd_delay)
+        self._cmd_history: deque[np.ndarray] = deque(
+            [np.zeros(7)] * self._cmd_history_len,
+            maxlen=self._cmd_history_len,
         )
         self._ee_initial = np.zeros(3)
 
@@ -196,15 +204,20 @@ class FrankaTrackingEnv(gym.Env):
 
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_forward(self.model, self.data)
-        self._q_setpoint = self.data.qpos[:7].copy()
-        self._ik_q_setpoint = self.data.qpos[:7].copy()
+        home_q = self.data.qpos[:7].copy()
+        self._q_setpoint = home_q.copy()
+        self._ik_q_setpoint = home_q.copy()
         if self._action_filter_zi is not None:
             self._action_filter_zi[:] = 0.0   # reset filter to rest each episode
         self._prev_ee_pos = self.data.xpos[self.hand_id].copy()
         self._prev_ee_vel = np.zeros(3)
         self._prev_pos_err: float = 0.0
-        self._residual_history.clear()
-        self._residual_history.extend([np.zeros(7)] * self._residual_history_len)
+        self._prev_residual = np.zeros(7)
+        # Fill delay buffer with home_q so the robot doesn't lurch from a
+        # zero-command transient on the first cmd_delay steps of each episode.
+        self.disturb.reset(fill_value=home_q)
+        self._cmd_history.clear()
+        self._cmd_history.extend([home_q.copy()] * self._cmd_history_len)
         self._t = 0.0
         self._t_steps = 0
 
@@ -273,18 +286,20 @@ class FrankaTrackingEnv(gym.Env):
             self._ik_q_setpoint + ik_qdot * self.control_dt, jnt_lo, jnt_hi
         )
 
-        # ── Residual: applied as a non-accumulating position offset ──────────
-        # The residual goes through the action-delay buffer (models comm lag).
-        # The TOTAL setpoint is IK + one-step correction; it resets to the IK
-        # path the moment the residual drops to zero — no drift, no windup.
-        if self.cfg.use_residual:
-            delayed_residual = self.disturb.delay_action(residual)
-            correction = delayed_residual * self.control_dt
-        else:
-            correction = np.zeros(7)
-
+        # ── Residual: non-accumulating position offset (no individual delay) ──
+        correction = residual * self.control_dt if self.cfg.use_residual else np.zeros(7)
         self._q_setpoint = np.clip(self._ik_q_setpoint + correction, jnt_lo, jnt_hi)
-        self.data.ctrl[:7] = self._q_setpoint
+
+        # ── Whole-pipeline delay: IK + residual travel through the same FIFO ──
+        # This is the realistic model: the full command takes cmd_delay steps to
+        # reach the actuators.  IK cannot compensate for this without prediction;
+        # the residual policy can, via the lookahead in its observation.
+        # With cmd_delay=0 this is a passthrough — identical to no delay.
+        actual_cmd = self.disturb.delay_command(self._q_setpoint)
+        self.data.ctrl[:7] = actual_cmd
+
+        # Track what setpoints are in flight (for cmd_delta_hist in obs).
+        self._cmd_history.append(self._q_setpoint.copy())
         self.data.ctrl[7] = 0.0  # gripper closed-ish, doesn't matter
 
         for _ in range(self.sim_steps):
@@ -306,7 +321,7 @@ class FrankaTrackingEnv(gym.Env):
         r_vel = -self.cfg.w_vel * float(np.linalg.norm(vel_err))
         r_residual = -self.cfg.w_residual * float(np.dot(residual, residual))
         r_jerk = -self.cfg.w_jerk * float(np.dot(ee_acc, ee_acc))
-        r_smooth = -self.cfg.w_smooth * float(np.sum((residual - self._residual_history[-1]) ** 2))
+        r_smooth = -self.cfg.w_smooth * float(np.sum((residual - self._prev_residual) ** 2))
         # small shaped bonus for being close — keeps gradient strong near zero error
         r_bonus = (self.cfg.w_bonus * float(np.exp(-self.cfg.bonus_sharpness * np.dot(pos_err, pos_err)))
                    if self.cfg.bonus_sharpness > 0.0 else 0.0)
@@ -341,7 +356,7 @@ class FrankaTrackingEnv(gym.Env):
         self._prev_ee_pos = ee_pos
         self._prev_ee_vel = ee_vel
         self._prev_pos_err = pos_err_norm
-        self._residual_history.append(residual)
+        self._prev_residual = residual.copy()
 
         return self._compute_observation(), reward, terminated, truncated, info
 
@@ -435,9 +450,15 @@ class FrankaTrackingEnv(gym.Env):
                     traj_onehot[i] = 1.0
                     break
 
+        # cmd_delta_hist: pending desired setpoints minus current joint positions.
+        # Tells the policy what movement is already queued in the delay buffer
+        # so it can avoid double-commanding the same correction.
+        q_true = self.data.qpos[:7]
+        cmd_deltas = [cmd - q_true for cmd in self._cmd_history]  # oldest→newest
+
         obs = np.concatenate(
             [q, qd, ee_meas, pos_err, target_vel, ik_qdot, lookahead,
-             *self._residual_history,   # t-1, t-2, ..., t-act_delay (oldest→newest)
+             *cmd_deltas,       # (7 * cmd_delay) — pending command deltas
              traj_onehot]
         ).astype(np.float32)
         return obs

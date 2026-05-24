@@ -1,8 +1,21 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-results/ppo_residual/tb/
-results/ppo_residual/checkpoints/
-results/*/train_log.txt
-assets/mujoco_menagerie/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Training results — large binaries; commit only what you explicitly want to
+# preserve (e.g. git add -f results/canonical/final_model.zip)
+results/
+
+# Assets cloned separately (see README setup instructions)
+assets/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
 .DS_Store
+Thumbs.db

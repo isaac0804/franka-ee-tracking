@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Evaluate post-hoc inference techniques on trained models.
 
+NOTE — LEGACY SCRIPT (pre-delay architecture):
+    This script was written when the dominant error was action noise and
+    residual-only delay (act_delay=1).  Butterworth, deadzone, error-gain,
+    and obs-smoothing filters were evaluated as post-hoc patches at inference.
+
+    The current architecture uses whole-pipeline cmd_delay=5 (100 ms), making
+    delay compensation via lookahead the main task.  Post-hoc filters applied
+    to the policy output add latency on top of the delay and are likely harmful.
+
+    Use this script only to reproduce old results or as a reference.
+    For current models use evaluate.py directly.
+
 No retraining required.  Each technique is a stateful filter applied at
 inference time; techniques can be stacked.
 
