@@ -79,6 +79,12 @@ class EnvConfig:
     # blend the trajectory in from the home pose over this many seconds
     # (prevents a step in the desired position at t=0).
     ramp_in_seconds: float = 0.5
+    # action smoothing — EMA applied to raw policy output before execution.
+    # smoothed_t = (1-alpha)*smoothed_{t-1} + alpha*raw_t
+    # 1.0 = off.  0.2 ≈ 62 ms half-life at 50 Hz (empirically optimal in eval sweep).
+    # Baked into the env so the policy trains against its own smoothed output and
+    # the obs residual-history reflects what the robot actually did.
+    action_ema: float = 1.0
 
 
 class FrankaTrackingEnv(gym.Env):
@@ -111,6 +117,7 @@ class FrankaTrackingEnv(gym.Env):
         # A wrong residual at step t only displaces q_setpoint by one dt worth of
         # correction; it self-corrects at t+1 without IK having to fight it.
         self._ik_q_setpoint = np.zeros(7)
+        self._smoothed_action = np.zeros(7)   # EMA state; reset each episode
         self._prev_ee_pos = np.zeros(3)
         self._prev_ee_vel = np.zeros(3)
         self._prev_pos_err: float = 0.0
@@ -145,6 +152,7 @@ class FrankaTrackingEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         self._q_setpoint = self.data.qpos[:7].copy()
         self._ik_q_setpoint = self.data.qpos[:7].copy()
+        self._smoothed_action = np.zeros(7)
         self._prev_ee_pos = self.data.xpos[self.hand_id].copy()
         self._prev_ee_vel = np.zeros(3)
         self._prev_pos_err: float = 0.0
@@ -182,7 +190,18 @@ class FrankaTrackingEnv(gym.Env):
         return blended_pos, blended_vel
 
     def step(self, action: np.ndarray):
-        residual = np.asarray(action, dtype=np.float64).clip(-1.0, 1.0) * self.cfg.residual_scale
+        # Apply EMA to raw policy output.  The smoothed action is what the robot
+        # actually executes; the policy trains against its own smoothed behaviour
+        # so it learns to work with the filter rather than fight it.
+        # r_residual and r_smooth are computed on the smoothed action so the
+        # reward reflects true actuator effort, not the noisy policy output.
+        raw = np.asarray(action, dtype=np.float64).clip(-1.0, 1.0)
+        alpha = self.cfg.action_ema
+        if alpha < 1.0:
+            self._smoothed_action = (1.0 - alpha) * self._smoothed_action + alpha * raw
+        else:
+            self._smoothed_action = raw
+        residual = self._smoothed_action * self.cfg.residual_scale
 
         # IK command — uses the *measured* (noisy) EE position so observation
         # noise actually affects it, like it would on real hardware. The

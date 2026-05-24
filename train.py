@@ -57,6 +57,7 @@ def env_config_from_dict(d: dict) -> EnvConfig:
         fail_pos_err=d.get("fail_pos_err", 0.30),
         lookahead_horizon=d.get("lookahead_horizon", 5),
         lookahead_dt=d.get("lookahead_dt", 0.10),
+        action_ema=d.get("action_ema", 1.0),
         disturbance=DisturbanceConfig(
             obs_pos_noise=dist.get("obs_pos_noise", 0.005),
             obs_jnt_noise=dist.get("obs_jnt_noise", 0.002),

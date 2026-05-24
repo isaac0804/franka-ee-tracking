@@ -52,6 +52,7 @@ def _env_kwargs_from_cfg(saved_cfg: dict) -> dict:
         trajectory_pool=tuple(env.get("trajectory_pool", ["moving_target"])),
         lookahead_horizon=int(env.get("lookahead_horizon", 5)),
         lookahead_dt=float(env.get("lookahead_dt", 0.10)),
+        action_ema=float(env.get("action_ema", 1.0)),
         disturbance=DisturbanceConfig(
             obs_pos_noise=float(dist.get("obs_pos_noise", 0.005)),
             obs_jnt_noise=float(dist.get("obs_jnt_noise", 0.002)),
@@ -122,6 +123,7 @@ def _eval_config(
     trajectory_pool: tuple = ("moving_target",),
     lookahead_horizon: int = 5,
     lookahead_dt: float = 0.10,
+    action_ema: float = 1.0,
     disturbance: DisturbanceConfig | None = None,
 ) -> EnvConfig:
     return EnvConfig(
@@ -133,6 +135,7 @@ def _eval_config(
         seed=seed,
         lookahead_horizon=lookahead_horizon,
         lookahead_dt=lookahead_dt,
+        action_ema=action_ema,
     )
 
 
@@ -144,18 +147,29 @@ def run_residual(
     trajectory_pool: tuple = ("moving_target",),
     lookahead_horizon: int = 5,
     lookahead_dt: float = 0.10,
+    action_ema: float = 1.0,
     disturbance: DisturbanceConfig | None = None,
+    action_ema_posthoc: float = 1.0,
 ) -> dict:
     """Run one episode with the trained policy.
 
     All env kwargs must match the training config so the obs dim aligns with
     the loaded model / VecNormalize statistics.
+
+    action_ema: restored from training config — the baked-in EMA the env applies
+        internally.  Passed through to EnvConfig; do not set this manually.
+
+    action_ema_posthoc: additional EMA applied at inference time, BEFORE the
+        env sees the action.  Use only for post-hoc experiments on models that
+        were trained without baked EMA (action_ema=1.0).  Setting this on a
+        baked-EMA model causes double-smoothing.  Default 1.0 = off.
     """
     cfg = _eval_config(
         trajectory, use_residual=True, seed=seed,
         trajectory_pool=trajectory_pool,
         lookahead_horizon=lookahead_horizon,
         lookahead_dt=lookahead_dt,
+        action_ema=action_ema,
         disturbance=disturbance,
     )
     env = FrankaTrackingEnv(cfg)
@@ -163,9 +177,19 @@ def run_residual(
 
     obs = venv.reset()
     ee_pos, tgt_pos, err_mm, res_norms = [], [], [], []
+    smoothed_action: np.ndarray | None = None   # lazily initialised to match action shape
 
     while True:
-        action, _ = model.predict(obs, deterministic=True)
+        raw_action, _ = model.predict(obs, deterministic=True)
+        if action_ema_posthoc < 1.0:
+            if smoothed_action is None:
+                smoothed_action = raw_action.copy()
+            else:
+                smoothed_action = (1.0 - action_ema_posthoc) * smoothed_action + action_ema_posthoc * raw_action
+            action = smoothed_action
+        else:
+            action = raw_action
+
         obs, _, dones, infos = venv.step(action)
         info = infos[0]
         ee_pos.append(info["ee_pos"].copy())
@@ -301,8 +325,9 @@ def cmd_rollout(args):
     model, vn_ref, saved_cfg = load_model(args.model)
     env_kwargs = _env_kwargs_from_cfg(saved_cfg)
     traj = args.trajectory
-    print(f"rollout: {traj} (residual policy) ...")
-    result = run_residual(model, vn_ref, traj, **env_kwargs)
+    posthoc_ema = args.action_ema
+    print(f"rollout: {traj} (residual policy, baked_ema={env_kwargs['action_ema']}, posthoc_ema={posthoc_ema}) ...")
+    result = run_residual(model, vn_ref, traj, action_ema_posthoc=posthoc_ema, **env_kwargs)
 
     print(json.dumps(_strip_arrays(result), indent=2))
 
@@ -317,19 +342,22 @@ def cmd_ablation(args):
     model, vn_ref, saved_cfg = load_model(args.model)
     env_kwargs = _env_kwargs_from_cfg(saved_cfg)
     trajs = args.trajectories.split(",") if args.trajectories else ALL_TRAJECTORIES
+    posthoc_ema = args.action_ema
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    baked = env_kwargs["action_ema"]
+    ema_tag = f"  [baked={baked}" + (f", posthoc={posthoc_ema}]" if posthoc_ema < 1.0 else "]")
     results = {}
-    print(f"\n{'trajectory':<16} {'IK (mm)':>10} {'residual (mm)':>14} {'Δ':>8}")
+    print(f"\n{'trajectory':<16} {'IK (mm)':>10} {'residual (mm)':>14} {'Δ':>8}{ema_tag}")
     print("-" * 52)
 
     for traj in trajs:
         # Both IK and residual use the training disturbance so the comparison
         # is fair within each config (e.g. delay_0 compares both under delay=0).
         ik = run_ik(traj, disturbance=env_kwargs["disturbance"])
-        res = run_residual(model, vn_ref, traj, **env_kwargs)
+        res = run_residual(model, vn_ref, traj, action_ema_posthoc=posthoc_ema, **env_kwargs)
         improv = (ik["settled_rmse_mm"] - res["settled_rmse_mm"]) / ik["settled_rmse_mm"] * 100
         results[traj] = {"ik": ik, "residual": res, "improvement_pct": float(improv)}
         marker = " ✓" if improv > 0 else ""
@@ -360,12 +388,16 @@ def main():
     p.add_argument("--model", required=True, help="Path to final_model.zip")
     p.add_argument("--trajectory", default="moving_target", choices=ALL_TRAJECTORIES)
     p.add_argument("--out", default="results/eval")
+    p.add_argument("--action-ema", type=float, default=1.0, dest="action_ema",
+                   help="EMA coefficient on policy actions (1.0=off, 0.3=~38ms half-life)")
 
     p = sub.add_parser("ablation", help="IK vs residual comparison table + plot")
     p.add_argument("--model", required=True, help="Path to final_model.zip")
     p.add_argument("--trajectories", default=None,
                    help="Comma-separated subset, e.g. moving_target,circle (default: all)")
     p.add_argument("--out", default="results/eval")
+    p.add_argument("--action-ema", type=float, default=1.0, dest="action_ema",
+                   help="EMA coefficient on policy actions (1.0=off, 0.3=~38ms half-life)")
 
     args = parser.parse_args()
     {"rollout": cmd_rollout, "ablation": cmd_ablation}[args.mode](args)
