@@ -104,6 +104,13 @@ class FrankaTrackingEnv(gym.Env):
         self._t = 0.0
         self._t_steps = 0
         self._q_setpoint = np.zeros(7)
+        # IK-only setpoint tracked independently of the residual so that
+        # residual errors cannot accumulate into the IK path.  At every step:
+        #   _ik_q_setpoint += ik_qdot * dt          (IK integrates freely)
+        #   _q_setpoint     = _ik_q_setpoint + residual * dt  (offset, not integral)
+        # A wrong residual at step t only displaces q_setpoint by one dt worth of
+        # correction; it self-corrects at t+1 without IK having to fight it.
+        self._ik_q_setpoint = np.zeros(7)
         self._prev_ee_pos = np.zeros(3)
         self._prev_ee_vel = np.zeros(3)
         self._prev_pos_err: float = 0.0
@@ -137,6 +144,7 @@ class FrankaTrackingEnv(gym.Env):
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_forward(self.model, self.data)
         self._q_setpoint = self.data.qpos[:7].copy()
+        self._ik_q_setpoint = self.data.qpos[:7].copy()
         self._prev_ee_pos = self.data.xpos[self.hand_id].copy()
         self._prev_ee_vel = np.zeros(3)
         self._prev_pos_err: float = 0.0
@@ -183,14 +191,28 @@ class FrankaTrackingEnv(gym.Env):
         target_pos, target_vel = self._desired(self._t)
         ik_qdot = self._ik_command(target_pos, target_vel)
 
-        total_qdot = ik_qdot + (residual if self.cfg.use_residual else 0.0)
-        total_qdot = self.disturb.delay_action(total_qdot)
+        jnt_lo = self.model.jnt_range[:7, 0]
+        jnt_hi = self.model.jnt_range[:7, 1]
 
-        # Integrate joint setpoint, clip to joint limits.
-        self._q_setpoint = self._q_setpoint + total_qdot * self.control_dt
-        self._q_setpoint = np.clip(
-            self._q_setpoint, self.model.jnt_range[:7, 0], self.model.jnt_range[:7, 1]
+        # ── IK setpoint: integrates independently, never touched by residual ──
+        # This is the joint trajectory that pure IK would produce.  Keeping it
+        # separate ensures that any residual error at step t is fully absorbed
+        # by step t+1 — the IK path is never contaminated.
+        self._ik_q_setpoint = np.clip(
+            self._ik_q_setpoint + ik_qdot * self.control_dt, jnt_lo, jnt_hi
         )
+
+        # ── Residual: applied as a non-accumulating position offset ──────────
+        # The residual goes through the action-delay buffer (models comm lag).
+        # The TOTAL setpoint is IK + one-step correction; it resets to the IK
+        # path the moment the residual drops to zero — no drift, no windup.
+        if self.cfg.use_residual:
+            delayed_residual = self.disturb.delay_action(residual)
+            correction = delayed_residual * self.control_dt
+        else:
+            correction = np.zeros(7)
+
+        self._q_setpoint = np.clip(self._ik_q_setpoint + correction, jnt_lo, jnt_hi)
         self.data.ctrl[:7] = self._q_setpoint
         self.data.ctrl[7] = 0.0  # gripper closed-ish, doesn't matter
 
@@ -372,9 +394,9 @@ class FrankaTrackingEnv(gym.Env):
                 "center": home_ee,
                 "extent": float(self._rng.uniform(0.08, 0.14)),
                 "duration": self.cfg.episode_seconds + 1.0,
-                # was 0.3–0.6 Hz → target moving at 1–3 m/s (8–10× faster than circle).
-                # 0.01–0.02 Hz → mean ~0.14–0.16 m/s, comparable to circle/figure8.
-                "cutoff_hz": float(self._rng.uniform(0.01, 0.02)),
+                # 0.05–0.15 Hz → EE speed ~0.03–0.10 m/s, hard enough that IK
+                # lags (~25–40 mm) but not so fast it's geometrically infeasible.
+                "cutoff_hz": float(self._rng.uniform(0.05, 0.15)),
                 "seed": int(self._rng.integers(0, 1 << 30)),
             }
         if name == "unreachable":

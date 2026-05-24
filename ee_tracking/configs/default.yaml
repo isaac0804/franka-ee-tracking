@@ -5,14 +5,14 @@ env:
   trajectory_pool: ["moving_target"]   # focus on the hard case; add others once residual beats IK here
   residual_scale: 0.05                 # was 0.4 — trim, don't compete with IK
   use_residual: true
-  w_pos: 0.7                           # absolute position error
-  w_vel: 0.05
-  w_residual: 0.5                      # was 0.1 — strong cost on gratuitous corrections
-  w_jerk: 0.01
+  w_pos: 5.0                           # L1 pos error (m) — dominant term, ~-0.15/step at 30mm
+  w_vel: 0.1
+  w_residual: 0.5                      # soft constraint (~10% of pos signal at 30mm)
+  w_jerk: 0.001                        # regulariser only — was equal to pos term, too strong
   w_smooth: 0.05
-  w_delta_pos: 0.3                     # reward improvement over previous step (0=off)
-  w_bonus: 0.5
-  bonus_sharpness: 50.0
+  w_delta_pos: 0.0                     # off — too noisy vs slow random walk
+  w_bonus: 0.0                         # off — was 55x larger than pos term, killed gradient
+  bonus_sharpness: 0.0
   fail_pos_err: 0.30
   lookahead_horizon: 5
   lookahead_dt: 0.10
@@ -23,7 +23,7 @@ env:
 
 train:
   total_timesteps: 1_500_000
-  n_envs: 32
+  n_envs: 10
   policy: "MlpPolicy"
   policy_kwargs:
     net_arch: [256, 256]

@@ -27,8 +27,37 @@ from ee_tracking.env.disturbances import DisturbanceConfig
 
 ALL_TRAJECTORIES = ["moving_target", "circle", "figure8", "unreachable"]
 
-# Eval uses the same disturbances as training so the comparison is fair.
-EVAL_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, act_delay=1)
+# Fallback disturbance when no saved config is available.
+_DEFAULT_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, act_delay=1)
+
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+
+def _env_kwargs_from_cfg(saved_cfg: dict) -> dict:
+    """Extract ALL observation-space-affecting env params from a saved config dict.
+
+    These must match the training env exactly or VecNormalize will have the
+    wrong input dimension and model.predict() will crash.
+
+    Affected obs dimensions:
+      - trajectory_pool  → one-hot length
+      - lookahead_horizon → 3 * horizon elements
+      - act_delay        → 7 * max(1, delay) residual-history elements
+    """
+    env = saved_cfg.get("env", {})
+    dist = env.get("disturbance", {})
+    return dict(
+        trajectory_pool=tuple(env.get("trajectory_pool", ["moving_target"])),
+        lookahead_horizon=int(env.get("lookahead_horizon", 5)),
+        lookahead_dt=float(env.get("lookahead_dt", 0.10)),
+        disturbance=DisturbanceConfig(
+            obs_pos_noise=float(dist.get("obs_pos_noise", 0.005)),
+            obs_jnt_noise=float(dist.get("obs_jnt_noise", 0.002)),
+            act_delay=int(dist.get("act_delay", 1)),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -36,15 +65,31 @@ EVAL_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, a
 # ---------------------------------------------------------------------------
 
 def load_model(model_path: str):
-    """Load PPO model + freeze VecNormalize stats (if available)."""
+    """Load PPO model + freeze VecNormalize stats (if available).
+
+    Returns (model, vn_ref, saved_cfg).
+
+    Reads config.yaml saved alongside the model so the temp env used to load
+    VecNormalize has the EXACT same observation space as training.  All three
+    axes that change obs dim are restored: trajectory_pool, lookahead_horizon,
+    and act_delay.
+    """
+    import yaml
     model_p = Path(model_path)
     vn_path = model_p.parent / "vecnormalize.pkl"
+    cfg_path = model_p.parent / "config.yaml"
 
-    model = PPO.load(str(model_p), device="auto")
+    model = PPO.load(str(model_p), device="cpu")
+
+    saved_cfg: dict = {}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            saved_cfg = yaml.safe_load(f) or {}
 
     if vn_path.exists():
-        # Load stats only — we'll apply them to fresh eval envs.
-        tmp = DummyVecEnv([lambda: FrankaTrackingEnv()])
+        kwargs = _env_kwargs_from_cfg(saved_cfg)
+        tmp_cfg = EnvConfig(**kwargs)
+        tmp = DummyVecEnv([lambda: FrankaTrackingEnv(tmp_cfg)])
         vn_ref = VecNormalize.load(str(vn_path), tmp)
         vn_ref.training = False
         vn_ref.norm_reward = False
@@ -52,7 +97,7 @@ def load_model(model_path: str):
     else:
         vn_ref = None
 
-    return model, vn_ref
+    return model, vn_ref, saved_cfg
 
 
 def wrap_eval_env(env: FrankaTrackingEnv, vn_ref) -> DummyVecEnv | VecNormalize:
@@ -70,19 +115,49 @@ def wrap_eval_env(env: FrankaTrackingEnv, vn_ref) -> DummyVecEnv | VecNormalize:
 # Episode runners
 # ---------------------------------------------------------------------------
 
-def _eval_config(trajectory: str, use_residual: bool, seed: int) -> EnvConfig:
+def _eval_config(
+    trajectory: str,
+    use_residual: bool,
+    seed: int,
+    trajectory_pool: tuple = ("moving_target",),
+    lookahead_horizon: int = 5,
+    lookahead_dt: float = 0.10,
+    disturbance: DisturbanceConfig | None = None,
+) -> EnvConfig:
     return EnvConfig(
         trajectory=trajectory,
         randomize_trajectory=False,
         use_residual=use_residual,
-        disturbance=EVAL_DISTURBANCE,
+        disturbance=disturbance if disturbance is not None else _DEFAULT_DISTURBANCE,
+        trajectory_pool=trajectory_pool,
         seed=seed,
+        lookahead_horizon=lookahead_horizon,
+        lookahead_dt=lookahead_dt,
     )
 
 
-def run_residual(model, vn_ref, trajectory: str, seed: int = 42) -> dict:
-    """Run one episode with the trained policy."""
-    cfg = _eval_config(trajectory, use_residual=True, seed=seed)
+def run_residual(
+    model,
+    vn_ref,
+    trajectory: str,
+    seed: int = 42,
+    trajectory_pool: tuple = ("moving_target",),
+    lookahead_horizon: int = 5,
+    lookahead_dt: float = 0.10,
+    disturbance: DisturbanceConfig | None = None,
+) -> dict:
+    """Run one episode with the trained policy.
+
+    All env kwargs must match the training config so the obs dim aligns with
+    the loaded model / VecNormalize statistics.
+    """
+    cfg = _eval_config(
+        trajectory, use_residual=True, seed=seed,
+        trajectory_pool=trajectory_pool,
+        lookahead_horizon=lookahead_horizon,
+        lookahead_dt=lookahead_dt,
+        disturbance=disturbance,
+    )
     env = FrankaTrackingEnv(cfg)
     venv = wrap_eval_env(env, vn_ref)
 
@@ -104,9 +179,17 @@ def run_residual(model, vn_ref, trajectory: str, seed: int = 42) -> dict:
     return _metrics(np.array(ee_pos), np.array(tgt_pos), np.array(err_mm), np.array(res_norms))
 
 
-def run_ik(trajectory: str, seed: int = 42) -> dict:
-    """Run one episode with pure IK (zero residual action)."""
-    cfg = _eval_config(trajectory, use_residual=False, seed=seed)
+def run_ik(
+    trajectory: str,
+    seed: int = 42,
+    disturbance: DisturbanceConfig | None = None,
+) -> dict:
+    """Run one episode with pure IK (zero residual action).
+
+    Uses the same disturbance as the residual policy so the comparison is
+    fair within each sweep config (e.g. delay_0 compares both under delay=0).
+    """
+    cfg = _eval_config(trajectory, use_residual=False, seed=seed, disturbance=disturbance)
     env = FrankaTrackingEnv(cfg)
     obs, _ = env.reset(seed=seed)
 
@@ -215,10 +298,11 @@ def plot_ablation(results: dict, save_path: Path):
 # ---------------------------------------------------------------------------
 
 def cmd_rollout(args):
-    model, vn_ref = load_model(args.model)
+    model, vn_ref, saved_cfg = load_model(args.model)
+    env_kwargs = _env_kwargs_from_cfg(saved_cfg)
     traj = args.trajectory
     print(f"rollout: {traj} (residual policy) ...")
-    result = run_residual(model, vn_ref, traj)
+    result = run_residual(model, vn_ref, traj, **env_kwargs)
 
     print(json.dumps(_strip_arrays(result), indent=2))
 
@@ -230,7 +314,8 @@ def cmd_rollout(args):
 
 
 def cmd_ablation(args):
-    model, vn_ref = load_model(args.model)
+    model, vn_ref, saved_cfg = load_model(args.model)
+    env_kwargs = _env_kwargs_from_cfg(saved_cfg)
     trajs = args.trajectories.split(",") if args.trajectories else ALL_TRAJECTORIES
 
     out = Path(args.out)
@@ -241,8 +326,10 @@ def cmd_ablation(args):
     print("-" * 52)
 
     for traj in trajs:
-        ik = run_ik(traj)
-        res = run_residual(model, vn_ref, traj)
+        # Both IK and residual use the training disturbance so the comparison
+        # is fair within each config (e.g. delay_0 compares both under delay=0).
+        ik = run_ik(traj, disturbance=env_kwargs["disturbance"])
+        res = run_residual(model, vn_ref, traj, **env_kwargs)
         improv = (ik["settled_rmse_mm"] - res["settled_rmse_mm"]) / ik["settled_rmse_mm"] * 100
         results[traj] = {"ik": ik, "residual": res, "improvement_pct": float(improv)}
         marker = " ✓" if improv > 0 else ""

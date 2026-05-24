@@ -147,7 +147,7 @@ def main():
     def make_env():
         return FrankaTrackingEnv(env_config)
 
-    vec_env = SubprocVecEnv([make_env] * n_envs, start_method="fork")
+    vec_env = SubprocVecEnv([make_env] * n_envs)
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
     # PPO
@@ -172,7 +172,7 @@ def main():
         tensorboard_log=str(out_dir / "tb"),
         verbose=1,
         seed=seed,
-        device="auto",
+        device="cpu",
     )
 
     checkpoint_freq = max(200_000 // n_envs, 1)
