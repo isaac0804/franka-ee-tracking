@@ -2,7 +2,7 @@
 
 7-DoF Franka Panda end-effector tracking in MuJoCo, trained with residual PPO on top of a damped-least-squares IK baseline. The core challenge is a **5-step (100 ms) whole-pipeline command delay** that causes reactive controllers to systematically lag the target. A transformer policy with delay-aware observations learns predictive corrections the IK cannot make.
 
-<!-- TODO: replace with best tracking GIF once 5M model is recorded -->
+![Tracking animation](results/figures/tracking_3d_moving_target.gif)
 
 ---
 
@@ -10,9 +10,9 @@
 
 ![RMSE comparison](results/figures/rmse_comparison.png)
 
-All numbers are RMSE (mm) after settling. Lower is better.
+Settled RMSE (mm) — lower is better. All 300k rows evaluated on a single fixed seed (seed=42) for consistency with ablations. †Moving target (random walk) is stochastic: single-seed values; see rigorous multi-seed table below.
 
-| Model | Steps | Moving Target | Circle | Figure-8 |
+| Model | Steps | Moving Target† | Circle | Figure-8 |
 |---|---|---|---|---|
 | IK baseline (no delay) | — | ~18 mm | ~8 mm | ~4 mm |
 | **IK baseline (100 ms delay)** | — | **38.1 mm** | **12.1 mm** | **7.7 mm** |
@@ -23,9 +23,44 @@ All numbers are RMSE (mm) after settling. Lower is better.
 | **Transformer (no cross-attn)** | **300k** | **23.6 mm** | **4.9 mm** | **4.8 mm** |
 | **Transformer (no cross-attn)** | **5M** | **19.7 mm** | **5.3 mm** | **6.0 mm** |
 
-**Key result:** The transformer at 300k steps matches the MLP at 10M steps on circular and figure-8 trajectories — a **33× step efficiency advantage**. At 5M steps the transformer matches the MLP champion on circle (5.3 mm) and closes within 4 mm on the random-walk trajectory (19.7 vs 16.0 mm).
+**Key result:** The transformer at 300k steps matches the MLP at 10M steps on circular and figure-8 trajectories — a **33× step efficiency advantage**.
 
-![Step efficiency](results/figures/efficiency_curve.png) The paired slot token design encodes the delay structure directly, which the MLP must discover from scratch over millions of steps.
+![Step efficiency](results/figures/efficiency_curve.png)
+
+---
+
+### Rigorous 5M comparison (multi-seed)
+
+For the final 5M models, moving-target RMSE is averaged over 10 random-walk seeds; circle and figure-8 are deterministic. Smoothness metrics are computed over the settled portion of each episode.
+
+| Model | Moving Target | Circle | Figure-8 |
+|---|---|---|---|
+| IK (100 ms delay) | 48.6 ± 8.0 mm | 11.5 mm | 7.7 mm |
+| MLP 5M (mean, 2 seeds) | 19.6 mm | 7.9 mm | 6.7 mm |
+| **Transformer 5M (seed=42)** | **20.7 ± 3.1 mm** | **4.5 mm** | **5.0 mm** |
+
+| Model | Action roughness¹ | Saturation rate² |
+|---|---|---|
+| MLP 5M (mean, 2 seeds) | 0.796 / 0.472 / 0.520 | 44.8% / 56.5% / 58.0% |
+| **Transformer 5M (seed=42)** | **0.614 / 0.279 / 0.292** | **28.9% / 55.1% / 45.2%** |
+
+¹ Mean \|a_t − a_{t−1}\| per joint per step (MT / CI / F8). Lower = smoother commands.  
+² Fraction of (timestep × joint) pairs where \|action\| > 0.9 (MT / CI / F8). Lower = less bang-bang.
+
+On periodic trajectories (circle, figure-8) the transformer is **43% and 25% more accurate** than the MLP at the same training budget. On the random-walk trajectory both are within noise (20.7 vs 19.6 mm). The transformer also produces smoother joint commands: 20–45% lower roughness across all trajectories.
+
+---
+
+### Out-of-distribution generalization (square, rectangle)
+
+Tested on trajectories **never seen during training** (traj-type one-hot is all-zeros at eval time):
+
+| Trajectory | IK | MLP 5M (best seed) | **Transformer 5M** |
+|---|---|---|---|
+| Square | 10.6 mm | 6.8 mm | **4.9 mm** |
+| Rectangle | 9.4 mm | 7.1 mm | **4.8 mm** |
+
+The transformer generalizes ~30% better than the best MLP seed on OOD shapes.
 
 ---
 

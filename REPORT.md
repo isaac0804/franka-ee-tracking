@@ -161,14 +161,53 @@ The structural prior in the tokenizer does the heavy lifting. Additional complex
 
 Training: `ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml`, seed=42, 5M steps, n_envs=20.
 
-Training `pos_err_mm` converged at ~11.4 mm by 4.6M steps (plateaued; final 400k steps omitted).
+Training `pos_err_mm` converged at ~11.4 mm by 4.6M steps (plateau; final 400k steps omitted).
+
+### Single-seed results (seed=42, for continuity with ablations)
 
 | Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
 |-------|-------|---------|---------|---------|
 | MLP champion | 10M | 16.0 | 5.3 | 4.7 |
 | **Transformer no_xattn** | **5M** | **19.7** | **5.3** | **6.0** |
 
-**Summary:** The 5M transformer matches the MLP champion exactly on circle (5.3 mm) and comes within 4 mm on the random-walk trajectory (19.7 vs 16.0 mm), using **half the training steps**. Figure-8 is 1.3 mm behind the MLP — likely due to single-seed variance; the 300k no_xattn model reached 4.8 mm F8 with different random initialization.
+### Rigorous multi-seed comparison (MLP vs Transformer at matched 5M steps)
+
+Moving-target RMSE is averaged over 10 random-walk seeds; circle/figure-8 are deterministic.
+Both MLP seeds were evaluated; transformer seed=1 result pending (TBD — training in progress).
+
+| Model | Moving Target | Circle | Figure-8 |
+|-------|--------------|--------|----------|
+| IK (100 ms delay) | 48.6 ± 8.0 mm | 11.5 mm | 7.7 mm |
+| MLP 5M (mean, 2 seeds) | 19.6 mm | 7.9 mm | 6.7 mm |
+| **Transformer 5M (seed=42)** | **20.7 ± 3.1 mm** | **4.5 mm** | **5.0 mm** |
+
+**Note on IK MT:** Single-seed eval gave 38.1 mm (seed=42); 10-seed mean is 48.6 ± 8.0 mm. The random-walk seed has large variance (σ=8 mm); single-seed comparisons for MT should be treated as approximate.
+
+**Periodic trajectory advantage is decisive at 5M steps:** transformer 4.5 mm vs MLP 7.9 mm on circle (−43%), 5.0 vs 6.7 mm on figure-8 (−25%). The structural prior pays off most where the pattern repeats and the delay compensation can be learned precisely.
+
+**Random-walk is essentially tied:** 20.7 vs 19.6 mm — within each model's seed-to-seed noise.
+
+### Smoothness metrics
+
+Computed over settled episode portion. `action_roughness` = mean |a_t − a_{t-1}| per joint/step; `saturation_rate` = fraction of (timestep, joint) with |action| > 0.9.
+
+| Model | MT rough | CI rough | F8 rough | MT sat% | CI sat% | F8 sat% |
+|-------|---------|---------|---------|---------|---------|---------|
+| MLP 5M (2-seed mean) | 0.796 | 0.472 | 0.520 | 44.8% | 56.5% | 58.0% |
+| **Transformer 5M** | **0.614** | **0.279** | **0.292** | **28.9%** | **55.1%** | **45.2%** |
+
+Transformer produces 20–45% smoother joint commands across all trajectories. The paired-slot architecture apparently learns more deliberate, pre-planned corrections rather than reactive bang-bang impulses.
+
+### Out-of-distribution generalization
+
+Evaluated on square and rectangle paths — **never seen during training** (traj-type one-hot is all-zeros at inference):
+
+| Trajectory | IK | MLP 5M (best seed) | **Transformer 5M** |
+|---|---|---|---|
+| Square | 10.6 mm | 6.8 mm | **4.9 mm** |
+| Rectangle | 9.4 mm | 7.1 mm | **4.8 mm** |
+
+Transformer generalizes ~30% better than the best MLP seed on OOD shapes. The paired-slot structure learns general "what is queued vs what is needed" reasoning rather than memorizing sinusoidal patterns.
 
 ---
 
@@ -194,7 +233,7 @@ Training `pos_err_mm` converged at ~11.4 mm by 4.6M steps (plateaued; final 400k
 The fine lookahead provides ground-truth future target positions — unrealistic for hardware. A real system would need a Kalman smoother or learned predictor over the observed target history. The architecture is set up to swap this in (same obs dimension).
 
 ### Post-hoc smoothing for hardware
-The bang-bang policy produces jerky joint commands (47–87% of actions saturated). For real Franka deployment, a 2 Hz Butterworth applied post-hoc at inference (not baked into training) would smooth commands without adding training-time latency.
+The MLP policy is notably bang-bang (45–58% of actions saturated, roughness 0.47–0.80). The transformer is smoother (29–55% saturation, roughness 0.28–0.61) but still produces discontinuous commands. For real Franka deployment, a low-pass filter applied post-hoc at inference would reduce mechanical stress without adding training-time latency.
 
 ### Orientation tracking
 Currently tracks only Cartesian EE position. The paired slot token architecture naturally extends to 6-DoF (position + quaternion) by expanding the fine lookahead and observation dimensions. The same structural prior should apply.

@@ -509,25 +509,23 @@ is already optimal. Less is more — the structural prior in the tokenizer does 
 
 ---
 
-## Phase 4 — Scale-Up (5M steps, in progress)
+## Phase 4 — Scale-Up (5M steps) ✅
 
 Config: `ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml`
-Model: `tfm_no_xattn`, seed=42, 5M steps, n_envs=20.
+Model: `tfm_no_xattn`, seed=42, 4.6M steps (converged; final 400k steps flat at 11–11.5 mm training pos_err).
 
-At 1.68M steps (33.6%), training `pos_err_mm` = 16.3 mm — already matching MLP@10M territory.
+Training `pos_err_mm` curve: 16.3 mm @ 1.68M → 11.4 mm @ 4.67M (plateaued).
 
-Comparison targets:
 | Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
 |-------|-------|---------|---------|---------|
 | MLP champion | 10M | 16.0 | 5.3 | 4.7 |
 | Transformer no_xattn (seed=42) | 300k | 23.6 | 4.9 | 4.8 |
-| **Transformer no_xattn (seed=42)** | **5M** | **TBD** | **TBD** | **TBD** |
+| **Transformer no_xattn (seed=42)** | **5M** | **19.7** | **5.3** | **6.0** |
 
-Expected: MT~16-18mm, CI~4-5mm, F8~4-5mm. If confirmed, transformer at 5M matches or
-beats MLP at 10M — a **2× step efficiency** advantage even beyond the 33× at 300k
-(which compared periodic trajectory performance).
-
-Results to be added when run completes (~ETA 15:40 BST, 2026-05-26).
+**Result:** CI matches MLP champion exactly (5.3 mm) at half the steps. MT is 3.7 mm behind
+(19.7 vs 16.0 mm) — the random-walk trajectory is the hardest case and likely needs either a
+second seed or more steps to close. F8 at 6.0 mm is slightly behind the 300k seed=42 result
+(4.8 mm), consistent with single-seed variance.
 
 ---
 

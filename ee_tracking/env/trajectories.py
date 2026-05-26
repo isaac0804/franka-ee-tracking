@@ -137,6 +137,87 @@ class Unreachable(Trajectory):
         return pos, vel
 
 
+class Square(Trajectory):
+    """Square path in the y-z plane — OOD trajectory (not in training pool).
+
+    Travels counterclockwise: right→top→left→bottom→right.
+    Velocity is piecewise-constant (magnitude `side/T_edge`) with instantaneous
+    direction changes at each corner.  The policy's fine lookahead can *see*
+    the upcoming corner 100ms ahead and pre-steer; the delayed IK cannot.
+    The one-hot in the observation will be all-zeros (unknown trajectory type).
+    """
+
+    def __init__(self, center=(0.5, 0.0, 0.5), side=0.16, period=8.0):
+        self.center = np.asarray(center, dtype=np.float64)
+        self.side   = float(side)
+        self.T      = float(period)
+        self.duration = 3 * self.T
+
+    def sample(self, t: float):
+        s = self.side / 2.0
+        # Corners (y, z) going counterclockwise: BR → TR → TL → BL
+        corners = np.array([
+            [0.0,  s, -s],
+            [0.0,  s,  s],
+            [0.0, -s,  s],
+            [0.0, -s, -s],
+        ])
+        phase     = (t % self.T) / self.T       # [0, 1)
+        seg       = int(phase * 4) % 4          # which edge 0-3
+        seg_phase = (phase * 4) % 1.0           # how far along this edge
+
+        start = corners[seg]
+        end   = corners[(seg + 1) % 4]
+        pos = self.center + start + seg_phase * (end - start)
+        vel = (end - start) * (4.0 / self.T)   # constant velocity vector on this edge
+        return pos, vel
+
+
+class Rectangle(Trajectory):
+    """Rectangular path (2:1 aspect ratio) in the y-z plane — OOD trajectory.
+
+    Wider than tall, tests asymmetric tracking.  Otherwise same structure as
+    Square (piecewise-constant velocity, hard corners).
+    """
+
+    def __init__(self, center=(0.5, 0.0, 0.5), width=0.20, height=0.10, period=9.0):
+        self.center = np.asarray(center, dtype=np.float64)
+        self.w = float(width)   # y-extent
+        self.h = float(height)  # z-extent
+        self.T = float(period)
+        self.duration = 3 * self.T
+
+    def sample(self, t: float):
+        yw, zh = self.w / 2.0, self.h / 2.0
+        perimeter = 2 * (self.w + self.h)
+
+        # Corners (y, z) going counterclockwise: BR → TR → TL → BL
+        corners = np.array([
+            [0.0,  yw, -zh],
+            [0.0,  yw,  zh],
+            [0.0, -yw,  zh],
+            [0.0, -yw, -zh],
+        ])
+        # Edge lengths and durations
+        edge_lens = np.array([self.h, self.w, self.h, self.w])
+        edge_durs = edge_lens / perimeter * self.T   # time allocated per edge
+
+        phase = t % self.T
+        cum = 0.0
+        for seg in range(4):
+            if phase < cum + edge_durs[seg] or seg == 3:
+                seg_phase = (phase - cum) / edge_durs[seg]
+                seg_phase = np.clip(seg_phase, 0.0, 1.0)
+                start = corners[seg]
+                end   = corners[(seg + 1) % 4]
+                pos = self.center + start + seg_phase * (end - start)
+                vel = (end - start) / edge_durs[seg]
+                return pos, vel
+            cum += edge_durs[seg]
+        # fallback
+        return self.center + corners[0], np.zeros(3)
+
+
 def make(name: str, **kwargs) -> Trajectory:
     name = name.lower()
     if name == "circle":
@@ -147,4 +228,8 @@ def make(name: str, **kwargs) -> Trajectory:
         return MovingTarget(**kwargs)
     if name == "unreachable":
         return Unreachable(**kwargs)
+    if name == "square":
+        return Square(**kwargs)
+    if name in ("rectangle", "rect"):
+        return Rectangle(**kwargs)
     raise ValueError(f"unknown trajectory: {name}")

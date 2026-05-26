@@ -28,6 +28,8 @@ from ee_tracking.policies.gelu_policy import POLICY_REGISTRY as _POLICY_REGISTRY
 import ee_tracking.policies.transformer_policy  # noqa: F401 — registers transformer classes for cloudpickle on PPO.load
 
 ALL_TRAJECTORIES = ["moving_target", "circle", "figure8", "unreachable"]
+# OOD trajectories: never seen during training; one-hot is all-zeros at eval time.
+OOD_TRAJECTORIES = ["square", "rectangle"]
 
 # Fallback disturbance when no saved config is available.
 _DEFAULT_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, cmd_delay=5)
@@ -196,7 +198,7 @@ def run_residual(
     venv = wrap_eval_env(env, vn_ref)
 
     obs = venv.reset()
-    ee_pos, tgt_pos, err_mm, res_norms = [], [], [], []
+    ee_pos, tgt_pos, err_mm, res_norms, actions = [], [], [], [], []
     smoothed_action: np.ndarray | None = None   # lazily initialised to match action shape
 
     while True:
@@ -216,11 +218,13 @@ def run_residual(
         tgt_pos.append(info["target_pos"].copy())
         err_mm.append(float(info["pos_err"]) * 1000.0)
         res_norms.append(float(info.get("residual_norm", 0.0)))
+        actions.append(raw_action[0].copy())   # shape (7,) — pre-scale policy output
         if dones[0]:
             break
 
     venv.close()
-    return _metrics(np.array(ee_pos), np.array(tgt_pos), np.array(err_mm), np.array(res_norms))
+    return _metrics(np.array(ee_pos), np.array(tgt_pos), np.array(err_mm),
+                    np.array(res_norms), np.array(actions))
 
 
 def run_ik(
@@ -250,9 +254,9 @@ def run_ik(
     return _metrics(np.array(ee_pos), np.array(tgt_pos), np.array(err_mm), np.zeros(len(err_mm)))
 
 
-def _metrics(ee_pos, tgt_pos, err_mm, res_norms) -> dict:
+def _metrics(ee_pos, tgt_pos, err_mm, res_norms, actions=None) -> dict:
     settle = max(1, int(len(err_mm) / 6))  # discard first ~1 s (50 steps at 50 Hz)
-    return {
+    out = {
         "rmse_mm": float(np.sqrt(np.mean(err_mm ** 2))),
         "settled_rmse_mm": float(np.sqrt(np.mean(err_mm[settle:] ** 2))),
         "max_mm": float(np.max(err_mm)),
@@ -262,10 +266,58 @@ def _metrics(ee_pos, tgt_pos, err_mm, res_norms) -> dict:
         "_tgt_pos": tgt_pos,
         "_err_mm": err_mm,
     }
+    if actions is not None and len(actions) > settle + 1:
+        a = actions[settle:]                              # (T, 7), in [-1, 1]
+        diffs = np.abs(np.diff(a, axis=0))               # (T-1, 7)
+        out["action_roughness"] = float(np.mean(diffs))  # mean |a_t - a_{t-1}| per joint per step
+        out["saturation_rate"]  = float(np.mean(np.abs(a) > 0.9))  # fraction of (t,joint) near ±1
+        out["action_std"]       = float(np.mean(np.std(a, axis=0))) # per-joint std, then mean
+        out["_actions"] = actions
+    return out
 
 
 def _strip_arrays(d: dict) -> dict:
     return {k: v for k, v in d.items() if not k.startswith("_")}
+
+
+# Trajectories that vary with seed — need multi-run averaging
+_STOCHASTIC_TRAJECTORIES = {"moving_target", "moving", "unreachable"}
+
+
+def run_multi(run_fn, trajectory: str, n_seeds: int = 10, base_seed: int = 0, **kwargs) -> dict:
+    """Run `run_fn` over `n_seeds` consecutive seeds and aggregate scalar metrics.
+
+    Returns the same dict shape as a single run, but scalar metrics become
+    mean values; adds `*_std` and `*_seeds` keys for stochastic trajectories.
+    Array fields (_ee_pos, _tgt_pos, _err_mm, _actions) are taken from seed 0.
+
+    For deterministic trajectories (circle, figure8, square, rectangle) n_seeds
+    is silently clamped to 1 — multiple seeds give identical episodes.
+    """
+    if trajectory not in _STOCHASTIC_TRAJECTORIES:
+        n_seeds = 1
+
+    results = []
+    for i in range(n_seeds):
+        r = run_fn(trajectory=trajectory, seed=base_seed + i, **kwargs)
+        results.append(r)
+
+    if n_seeds == 1:
+        return results[0]
+
+    # Aggregate scalar metrics across seeds
+    scalar_keys = [k for k in results[0] if not k.startswith("_")]
+    aggregated = {}
+    for k in scalar_keys:
+        vals = [r[k] for r in results]
+        aggregated[k]          = float(np.mean(vals))
+        aggregated[k + "_std"] = float(np.std(vals))
+        aggregated[k + "_n"]   = n_seeds
+    # Preserve arrays from first seed for plotting
+    for k in results[0]:
+        if k.startswith("_"):
+            aggregated[k] = results[0][k]
+    return aggregated
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +415,7 @@ def cmd_ablation(args):
     env_kwargs = _env_kwargs_from_cfg(saved_cfg)
     trajs = args.trajectories.split(",") if args.trajectories else ALL_TRAJECTORIES
     posthoc_ema = args.action_ema
+    n_seeds = args.n_seeds
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -370,30 +423,136 @@ def cmd_ablation(args):
     baked = env_kwargs["action_filter_hz"]
     ema_tag = f"  [baked={baked}" + (f", posthoc={posthoc_ema}]" if posthoc_ema < 1.0 else "]")
     results = {}
-    print(f"\n{'trajectory':<16} {'IK (mm)':>10} {'residual (mm)':>14} {'Δ':>8}{ema_tag}")
-    print("-" * 52)
+    print(f"\n{'trajectory':<16} {'IK (mm)':>10} {'residual (mm)':>14} {'Δ':>8}  "
+          f"{'roughness':>10} {'sat%':>6}{ema_tag}")
+    print("-" * 72)
 
     for traj in trajs:
-        # Both IK and residual use the training disturbance so the comparison
-        # is fair within each config (e.g. delay_0 compares both under delay=0).
-        ik = run_ik(traj, disturbance=env_kwargs["disturbance"])
-        res = run_residual(model, vn_ref, traj, action_ema_posthoc=posthoc_ema, **env_kwargs)
-        improv = (ik["settled_rmse_mm"] - res["settled_rmse_mm"]) / ik["settled_rmse_mm"] * 100
+        ik  = run_multi(run_ik,  traj, n_seeds=n_seeds,
+                        disturbance=env_kwargs["disturbance"])
+        res = run_multi(run_residual, traj, n_seeds=n_seeds,
+                        model=model, vn_ref=vn_ref,
+                        action_ema_posthoc=posthoc_ema, **env_kwargs)
+
+        ik_rmse  = ik["settled_rmse_mm"]
+        res_rmse = res["settled_rmse_mm"]
+        improv   = (ik_rmse - res_rmse) / ik_rmse * 100
+        marker   = " ✓" if improv > 0 else ""
+
+        # Uncertainty suffix — only for stochastic trajectories with n_seeds > 1
+        ik_sfx  = f"±{ik.get('settled_rmse_mm_std', 0):.1f}"  if "settled_rmse_mm_std" in ik  else ""
+        res_sfx = f"±{res.get('settled_rmse_mm_std', 0):.1f}" if "settled_rmse_mm_std" in res else ""
+        roughness = res.get("action_roughness", float("nan"))
+        sat_pct   = res.get("saturation_rate",  float("nan")) * 100
+
+        print(f"{traj:<16} {ik_rmse:>7.1f}{ik_sfx:<4} {res_rmse:>11.1f}{res_sfx:<4} "
+              f"{improv:>+7.1f}%{marker}  {roughness:>10.4f} {sat_pct:>5.1f}%")
+
         results[traj] = {"ik": ik, "residual": res, "improvement_pct": float(improv)}
-        marker = " ✓" if improv > 0 else ""
-        print(f"{traj:<16} {ik['settled_rmse_mm']:>10.1f} {res['settled_rmse_mm']:>14.1f} "
-              f"{improv:>+7.1f}%{marker}")
 
     print()
     plot_ablation(results, out / "ablation.png")
 
-    save = {t: {"ik_settled_rmse_mm": r["ik"]["settled_rmse_mm"],
-                "residual_settled_rmse_mm": r["residual"]["settled_rmse_mm"],
-                "improvement_pct": r["improvement_pct"]}
-            for t, r in results.items()}
+    save = {}
+    for t, r in results.items():
+        entry = {
+            "ik_settled_rmse_mm":       r["ik"]["settled_rmse_mm"],
+            "residual_settled_rmse_mm": r["residual"]["settled_rmse_mm"],
+            "improvement_pct":          r["improvement_pct"],
+        }
+        # carry through std and smoothness if present
+        for k in ("settled_rmse_mm_std", "settled_rmse_mm_n"):
+            if k in r["residual"]:
+                entry["residual_" + k] = r["residual"][k]
+            if k in r["ik"]:
+                entry["ik_" + k] = r["ik"][k]
+        for k in ("action_roughness", "saturation_rate", "action_std"):
+            if k in r["residual"]:
+                entry[k] = r["residual"][k]
+        save[t] = entry
+
     with open(out / "ablation.json", "w") as f:
         json.dump(save, f, indent=2)
     print(f"  json  → {out}/ablation.json")
+
+
+def cmd_ood(args):
+    """Evaluate one or more models on OOD trajectories (square, rectangle).
+
+    The training trajectory_pool is preserved so the obs dim matches.
+    The traj_onehot will be all-zeros (trajectory type unknown to the policy).
+    This tests generalisation: the policy never saw these shapes during training.
+    """
+    trajs = args.trajectories.split(",") if args.trajectories else OOD_TRAJECTORIES
+
+    # Collect models: --model accepts multiple paths
+    model_paths = args.models
+    entries = []   # list of (label, model, vn_ref, env_kwargs)
+    for path in model_paths:
+        m, vn, cfg = load_model(path)
+        label = Path(path).parent.name   # use run dir name as label
+        entries.append((label, m, vn, _env_kwargs_from_cfg(cfg)))
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # ── print table ──────────────────────────────────────────────────────────
+    col_w = 14
+    header = f"{'trajectory':<16} {'IK (mm)':>{col_w}}"
+    for label, *_ in entries:
+        header += f" {label[:col_w]:>{col_w}}"
+    print(f"\n{header}")
+    print("-" * (16 + col_w + col_w * len(entries) + len(entries)))
+
+    all_results = {}
+    for traj in trajs:
+        ik = run_ik(traj, disturbance=entries[0][3]["disturbance"])
+        row = f"{traj:<16} {ik['settled_rmse_mm']:>{col_w}.1f}"
+        traj_results = {"ik_settled_rmse_mm": ik["settled_rmse_mm"], "models": {}}
+        for label, model, vn_ref, env_kwargs in entries:
+            res = run_residual(model, vn_ref, traj, **env_kwargs)
+            improv = (ik["settled_rmse_mm"] - res["settled_rmse_mm"]) / ik["settled_rmse_mm"] * 100
+            row += f" {res['settled_rmse_mm']:>{col_w}.1f}"
+            traj_results["models"][label] = {
+                "residual_settled_rmse_mm": res["settled_rmse_mm"],
+                "improvement_pct": float(improv),
+            }
+        print(row)
+        all_results[traj] = traj_results
+
+    print()
+
+    # ── save json ────────────────────────────────────────────────────────────
+    json_path = out / "ood.json"
+    with open(json_path, "w") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"  json  → {json_path}")
+
+    # ── trajectory plots ──────────────────────────────────────────────────────
+    for traj in trajs:
+        fig, axes = plt.subplots(1, len(entries) + 1,
+                                 figsize=(4 * (len(entries) + 1), 4),
+                                 sharey=True)
+        fig.suptitle(f"OOD: {traj}", fontsize=12)
+
+        ik_res = run_ik(traj, disturbance=entries[0][3]["disturbance"])
+        for ax, (label_or_ik, res_data) in zip(
+            axes,
+            [("IK baseline", ik_res)] + [(label, run_residual(m, vn, traj, **kw))
+                                          for label, m, vn, kw in entries]
+        ):
+            err = np.array(res_data["_err_mm"])
+            ax.plot(err, lw=1.0, color="#e05252" if label_or_ik != "IK baseline" else "#aaaaaa")
+            ax.axhline(np.mean(err[len(err)//4:]), ls="--", lw=1.0, color="#333333")
+            ax.set_title(f"{label_or_ik}\n{np.mean(err[len(err)//4:]):.1f} mm", fontsize=9)
+            ax.set_xlabel("step")
+            ax.set_ylim(0, None)
+        axes[0].set_ylabel("tracking error (mm)")
+        plt.tight_layout()
+        fig_path = out / f"ood_{traj}.png"
+        fig.savefig(fig_path, dpi=130, bbox_inches="tight")
+        plt.close()
+        print(f"  plot  → {fig_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -418,9 +577,18 @@ def main():
     p.add_argument("--out", default="results/eval")
     p.add_argument("--action-ema", type=float, default=1.0, dest="action_ema",
                    help="EMA coefficient on policy actions (1.0=off, 0.3=~38ms half-life)")
+    p.add_argument("--n-seeds", type=int, default=10, dest="n_seeds",
+                   help="Seeds to average for stochastic trajectories like moving_target (default: 10)")
+
+    p = sub.add_parser("ood", help="OOD generalization eval (square, rectangle)")
+    p.add_argument("--models", required=True, nargs="+",
+                   help="One or more final_model.zip paths to compare side-by-side")
+    p.add_argument("--trajectories", default=None,
+                   help=f"Comma-separated OOD trajectories (default: {','.join(OOD_TRAJECTORIES)})")
+    p.add_argument("--out", default="results/eval/ood")
 
     args = parser.parse_args()
-    {"rollout": cmd_rollout, "ablation": cmd_ablation}[args.mode](args)
+    {"rollout": cmd_rollout, "ablation": cmd_ablation, "ood": cmd_ood}[args.mode](args)
 
 
 if __name__ == "__main__":

@@ -530,4 +530,17 @@ class FrankaTrackingEnv(gym.Env):
             }
         if name == "unreachable":
             return {"center": home_ee}
+        if name == "square":
+            return {
+                "center": home_ee,
+                "side":   float(self._rng.uniform(0.12, 0.18)),
+                "period": float(self._rng.uniform(6.0, 10.0)),
+            }
+        if name in ("rectangle", "rect"):
+            return {
+                "center": home_ee,
+                "width":  float(self._rng.uniform(0.16, 0.22)),
+                "height": float(self._rng.uniform(0.08, 0.12)),
+                "period": float(self._rng.uniform(8.0, 12.0)),
+            }
         return {}
