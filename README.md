@@ -33,33 +33,6 @@ The traj-type one-hot is all-zeros at eval time for OOD trajectories. The transf
 
 ---
 
-## Design Note
-
-### State and action
-The 95-D observation is structured around the delay. The key blocks are the **fine lookahead** (target positions at t+20ms … t+100ms, covering the exact 5-step delay window) and the **command history** (the 5 setpoints already queued in the FIFO). The command history is essential for the Markov property — without it the policy cannot tell whether IK is already compensating and stacks redundant corrections.
-
-Actions are 7-D per-joint residuals in [−1, 1], scaled by `residual_scale = 0.12 rad` and added to the IK setpoint. A zero action always falls back to IK, so an untrained policy degrades gracefully.
-
-### Reward
-```
-r = w_pos × (‖err_prev‖ − ‖err_now‖)   # reward progress, not absolute error
-  − w_vel × ‖ee_vel‖                    # penalise unnecessary motion
-  − w_residual × ‖action‖²              # small L2 regularisation on residual
-```
-No jerk or smoothness penalty. With a fixed 100 ms delay, the optimal strategy is a *predictive impulse* — inherently discontinuous. Penalising action changes would directly penalise the delay-compensation mechanism.
-
-### Trajectory representation
-Three types trained simultaneously in a mixed pool: **moving target** (band-limited random walk), **circle** (constant-speed orbit), **figure-8** (Lissajous curve). Single-trajectory training overfits — mixed training was the largest single improvement in the MLP phase and stabilises the critic across all architectures.
-
-Each trajectory provides oracle future positions as a lookahead. Orientation is not tracked (position only).
-
-### How tracking performance is evaluated
-`residual_settled_rmse_mm` — RMSE of the 3-D EE position error over the *settled* portion of each episode (after 0.5 s warmup), averaged per trajectory type. Settled RMSE separates steady-state tracking from transient startup and is the primary reported metric throughout.
-
-For stochastic trajectories (moving target, step target) results are averaged over 10 random seeds with ± std reported. Smoothness is quantified via **action roughness** (mean |a_t − a_{t−1}| per joint) and **saturation rate** (fraction of timesteps with |action| > 0.9) — both hardware-relevant proxies for motor stress.
-
----
-
 ## Quickstart
 
 ```bash
@@ -95,38 +68,26 @@ tensorboard --logdir results/my_run/tb
 
 ---
 
-## Approach
+## How it works
 
-### The delay problem
-
-A standard IK controller commands joint positions based on the *current* measured target. With a 5-step FIFO delay (100 ms round-trip), that command only executes when the target has already moved. On a fast random-walk trajectory this causes ~38 mm lag — more than double the no-delay IK error.
-
-The key insight: the delay window is known and fixed. If the policy can see both **where the target will be** when each queued command executes, and **what commands are already queued**, it can add a predictive correction that pre-compensates for the lag.
-
-### Residual control
-
-The policy outputs a **residual** on top of IK, not a full joint position command:
+A standard IK controller reacts to the *current* target. With a 5-step (100 ms) FIFO delay the command only executes when the target has already moved — causing ~49 mm lag on a random walk, 2.5× the no-delay error. The fix: if the policy sees **where the target will be** when each queued command executes, and **what commands are already queued**, it can add a predictive residual that pre-compensates.
 
 ```
 q_set(t) = clip(q_ik(t) + residual(t) × residual_scale, joint_limits)
-ctrl(t)  = q_set(t − 5)          ← whole pipeline delayed 5 steps
+ctrl(t)  = q_set(t − 5)    ← whole pipeline delayed 5 steps
 ```
 
-An untrained policy (residual ≈ 0) degrades gracefully to IK — the baseline is always available. The IK handles gross positioning; the residual only needs to learn the predictive delay-compensation correction.
-
-### Observation design
-
-The 95-D observation is structured around the delay:
+A zero residual always falls back to IK. The 95-D observation is structured around the delay:
 
 | Block | Dims | Content |
 |---|---|---|
 | Robot state | 30 | Joint positions/velocities, EE position, position error, IK command |
-| Fine lookahead | 15 | Target position at t+20ms … t+100ms — covers exact delay window |
-| Coarse lookahead | 12 | Target position at t+100ms … t+400ms — trajectory trend |
-| Command history | 35 | 5 queued setpoints minus current q — Markov restoring element |
+| Fine lookahead | 15 | Target at t+20ms … t+100ms — covers the exact 5-step delay window |
+| Coarse lookahead | 12 | Target at t+100ms … t+400ms — trajectory trend |
+| Command history | 35 | 5 queued setpoints − current q — prevents stacking redundant corrections |
 | Trajectory ID | 3 | One-hot: moving target / circle / figure-8 |
 
-The fine lookahead window covers exactly the 5-step delay. The command history reveals what corrections are already queued, preventing the policy from stacking redundant commands.
+Reward: `w_pos × (‖err_prev‖ − ‖err_now‖) − w_vel × ‖ee_vel‖ − w_residual × ‖action‖²`. No smoothness penalty — the optimal delay-compensation strategy is a predictive impulse, which is inherently discontinuous.
 
 ---
 
@@ -174,52 +135,7 @@ Ablations at 300k steps, each removing or adding one component from the canonica
 † mean over 2 seeds (seed=42: MT=23.6 CI=4.9 F8=4.8; seed=1: MT=25.2 CI=6.5 F8=5.5)
 ‡ mean over 2 seeds (seed=42: MT=25.9 CI=5.9 F8=5.9; seed=1: MT=27.2 CI=7.7 F8=7.8)
 
-**Finding A:** Adding cross-attention layers *degrades* performance on moving target and figure-8 while offering negligible benefit on circle. The paired token design already encodes the temporal alignment — `cmd[i]` paired with `fine[i]` gives the encoder the same structural prior cross-attention was meant to discover, making extra attention heads redundant.
-
-**Finding B:** Removing positional embeddings is catastrophic for periodic trajectories (+5.4 mm on circle, +5.5 mm on figure-8) but barely affects the random walk. The transformer needs PE to encode the execution-order of queued commands — without it, slot[0] and slot[4] look identical.
-
-**Finding C:** Unpairing the tokens degrades CI by +1.1 mm and F8 by +0.7 mm on average. The `cmd[i]↔fine[i]` pairing is the key structural prior — it wires temporal alignment into the encoder input rather than requiring the model to discover it from scratch.
-
----
-
-## Design choices
-
-### State and action space
-
-**State (95D):** Concatenates current robot state, oracle future target positions (fine + coarse lookahead), and the pending command queue. The command history is essential for the Markov property: without it the policy cannot distinguish "IK is already compensating" from "nothing is queued" and stacks redundant corrections.
-
-**Action (7D):** Per-joint position residuals in [−1, 1], scaled by `residual_scale = 0.12 rad`. A zero action always falls back to IK.
-
-### Reward
-
-```
-r = w_pos × (‖err_prev‖ − ‖err_now‖)   # reward progress toward target
-  − w_vel × ‖ee_vel‖                    # penalise unnecessary motion
-  − w_residual × ‖action‖²              # small regularisation on residual
-```
-
-No jerk or smoothness penalty. With a 5-step delay the optimal strategy is a *predictive impulse* — inherently discontinuous. Penalising action changes directly penalises the delay-compensation mechanism.
-
-### Trajectory representation
-
-Three trajectory types trained simultaneously:
-- **Moving target** — band-limited random walk (0.05–0.15 Hz, 8–14 cm amplitude)
-- **Circle** — constant-speed circular orbit
-- **Figure-8** — Lissajous curve with direction reversals
-
-Training with a mixed pool was essential: single-trajectory training overfits and degrades on held-out trajectories.
-
-### Evaluation metric
-
-`residual_settled_rmse_mm`: RMSE of the EE position error over the settled portion of each episode (after 0.5 s), per trajectory type. Separates steady-state tracking from transient startup.
-
-### Uncertainty sources
-
-| Source | Implementation |
-|---|---|
-| Observation noise | Gaussian on EE position (σ=5 mm) and joint positions (σ=2 mm) |
-| Command delay | 5-step FIFO applied to the full IK+residual setpoint (100 ms) |
-| Unreachable positions | Episode terminates at 0.30 m tracking error; included as an eval scenario |
+Positional embedding is critical for periodic trajectories — without it slot[0] and slot[4] are indistinguishable (+5–6 mm on circle/figure-8). Cross-attention *hurts*: the `cmd[i]↔fine[i]` pairing already encodes the temporal alignment it was meant to learn, making extra attention heads redundant.
 
 ---
 
