@@ -24,7 +24,7 @@ Both IK and the residual travel through the **same** FIFO. An untrained policy (
 
 ### Observation design
 
-The 81-D observation is structured around the delay:
+The 95-D observation is structured around the delay:
 
 | Block | Dims | Content |
 |-------|------|---------|
@@ -91,7 +91,7 @@ Key MLP findings (documented in detail in `EXPERIMENTS.md`):
 
 ### Motivation
 
-The 5-step delay creates a natural **sequence** structure: there are exactly 5 queued commands (`cmd[0..4]`) and 5 fine lookahead targets (`fine[0..4]`), where `cmd[i]` will execute when the target is at `fine[i]`. This temporal causal link is the key insight: an architecture that encodes this pairing directly should need far fewer training steps than an MLP that must discover it from a flat 81D vector.
+The 5-step delay creates a natural **sequence** structure: there are exactly 5 queued commands (`cmd[0..4]`) and 5 fine lookahead targets (`fine[0..4]`), where `cmd[i]` will execute when the target is at `fine[i]`. This temporal causal link is the key insight: an architecture that encodes this pairing directly should need far fewer training steps than an MLP that must discover it from a flat 95D vector.
 
 ### Paired slot tokens
 

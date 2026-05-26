@@ -76,7 +76,7 @@ An untrained policy (residual ≈ 0) degrades gracefully to IK — the baseline 
 
 ### Observation design
 
-The 81-D observation is structured around the delay:
+The 95-D observation is structured around the delay:
 
 | Block | Dims | Content |
 |---|---|---|
@@ -142,7 +142,7 @@ Ablations at 300k steps identify which components matter:
 
 ### State and action space
 
-**State (81D):** Concatenates current robot state, oracle future target positions (fine + coarse lookahead), and the pending command queue. The command history is essential for the Markov property: without it the policy cannot distinguish "IK is already compensating" from "nothing is queued" and stacks redundant corrections.
+**State (95D):** Concatenates current robot state, oracle future target positions (fine + coarse lookahead), and the pending command queue. The command history is essential for the Markov property: without it the policy cannot distinguish "IK is already compensating" from "nothing is queued" and stacks redundant corrections.
 
 **Action (7D):** Per-joint position residuals in [−1, 1], scaled by `residual_scale = 0.12 rad`. A zero action always falls back to IK.
 

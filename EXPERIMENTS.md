@@ -537,7 +537,7 @@ The key observation: `cmd[i]` (the queued joint setpoint) will execute when the 
 is at `fine[i]` (the lookahead position at that same time step). This is a temporal
 causal link — the error from cmd[i] depends on fine[i].
 
-**MLP:** Must discover this link from raw 81D concatenation over millions of steps.
+**MLP:** Must discover this link from raw 95D concatenation over millions of steps.
 The signal is there but buried in cross-dimensional correlations.
 
 **Unpaired transformer:** Separate cmd and fine token sequences; the encoder must learn

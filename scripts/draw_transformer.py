@@ -56,8 +56,8 @@ ax.axis("off")
 fig.patch.set_facecolor("#f8f8f8")
 ax.set_facecolor("#f8f8f8")
 
-ax.text(7.5, 9.7, "DelayTransformerPolicy — Architecture",
-        ha="center", va="center", fontsize=14, fontweight="bold", color="#333333")
+ax.text(7.5, 9.7, "DelayTransformerPolicy — Best Architecture (no cross-attention)",
+        ha="center", va="center", fontsize=13, fontweight="bold", color="#333333")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROW 1 — Observation segments
@@ -159,34 +159,41 @@ ax.text(8.0, y_enc + 0.18, "self-attn\n(slots↔slots)", fontsize=6.5,
         color=C_ATTN, ha="left", va="center")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ROW 5 — Cross-attention
+# ROW 5 — Mean pool + Concat  (NO cross-attention — ablation B finding)
 # ═══════════════════════════════════════════════════════════════════════════════
-y_xattn = 4.2
+y_pool = 4.4
 
-arrow(ax, 5.5,  y_enc   - 0.33, 5.5, y_xattn + 0.33, color=C_ATTN)
-arrow(ax, 11.2, y_state_proj - 0.25, 8.5, y_xattn + 0.33, color=C_PROJ)
+arrow(ax, 5.5, y_enc - 0.33, 5.5, y_pool + 0.28, color=C_ATTN)
 
-box(ax, 7.0, y_xattn, 4.4, 0.62,
-    "Cross-Attention  (Pre-LN)",
-    "state token  queries  →  slot tokens  (keys, values)\n"
-    "'which slot needs correction given where I am?'",
-    color=C_XATTN, fontsize=9)
+box(ax, 5.5, y_pool, 2.8, 0.52,
+    "mean pool  (slots dim)",
+    "→ slots_enc  (B, 64)",
+    color=C_ATTN, fontsize=9)
 
-# Query / Key-Value labels
-ax.text(5.7,  y_xattn + 0.12, "K, V\n(slots)", ha="center", fontsize=6.5, color=C_ATTN)
-ax.text(10.5, y_xattn + 0.20, "Q\n(state)", ha="center", fontsize=6.5, color=C_PROJ)
+# State path arrives from state_proj
+arrow(ax, 11.2, y_state_proj - 0.25, 11.2, y_pool + 0.10, color=C_PROJ)
+ax.text(10.6, y_pool + 0.14, "state_enc\n(B, 64)", ha="right", fontsize=6.5, color=C_PROJ)
 
-dim_label(ax, 7.0, y_xattn - 0.48, "→ state_out (B, 64)  +  slots.mean(1) (B, 64)")
+dim_label(ax, 5.5, y_pool - 0.43, "→ slots_enc (B, 64)")
+
+# Ablation B annotation
+ax.text(7.8, y_pool + 0.05,
+        "✦ Ablation B: removing cross-attention\n"
+        "  improves all metrics — paired tokens\n"
+        "  already encode the cmd↔fine alignment.",
+        fontsize=7, color="#555555", va="center",
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#dddddd", alpha=0.85))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROW 6 — Concat + split to actor / critic
 # ═══════════════════════════════════════════════════════════════════════════════
-y_cat = 3.15
+y_cat = 3.25
 
-arrow(ax, 7.0, y_xattn - 0.31, 7.0, y_cat + 0.28)
+arrow(ax, 5.5, y_pool - 0.26, 7.0, y_cat + 0.28, color=C_ATTN)
+arrow(ax, 11.2, y_pool + 0.10, 8.5, y_cat + 0.28, color=C_PROJ)
 
 box(ax, 7.0, y_cat, 3.2, 0.50,
-    "concat(state_out,  slots_mean)",
+    "concat(state_enc,  slots_enc)",
     "shared latent  →  128 dims",
     color="#6d9eeb", fontsize=9)
 
@@ -226,8 +233,7 @@ legend_items = [
     (C_OBS_CMD,    "cmd history"),
     (C_OBS_TRAJ,   "traj one-hot"),
     (C_PROJ,       "linear projection"),
-    (C_ATTN,       "self-attention"),
-    (C_XATTN,      "cross-attention"),
+    (C_ATTN,       "self-attention (no cross-attn)"),
     (C_MLP,        "MLP head"),
 ]
 lx, ly = 0.3, 4.5
