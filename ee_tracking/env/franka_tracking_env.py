@@ -24,17 +24,22 @@ its observation to *predict* where the target will be in cmd_delay steps and
 pre-position accordingly.  An untrained policy (action ≈ 0) degrades to IK
 with delay, which is the hardest IK baseline.
 
-Observation (per step, total dim = 7+7+3+3+3+7 + 3*H + 7*D + |pool|)
-    q                   (7)   — joint positions (noisy)
-    qdot                (7)   — joint velocities
-    ee_pos              (3)   — measured EE position (noisy)
-    ee_pos_error        (3)   — target - measured EE
-    target_vel          (3)   — desired EE velocity
-    ik_qdot             (7)   — IK joint-velocity command (current step)
-    lookahead_pos   (3*H)     — future target positions at lookahead_dt intervals
-    cmd_delta_hist  (7*D)     — pending setpoints minus current q (oldest→newest)
-                               tells the policy what movement is already queued
-    traj_onehot    (|pool|)   — one-hot trajectory type (reduces critic variance)
+Observation (per step, total dim = 7+7+3+3+3+7 + 3*(Hf+Hc) + 7*D + |pool|)
+    q                   (7)    — joint positions (noisy)
+    qdot                (7)    — joint velocities
+    ee_pos              (3)    — measured EE position (noisy)
+    ee_pos_error        (3)    — target - measured EE
+    target_vel          (3)    — desired EE velocity
+    ik_qdot             (7)    — IK joint-velocity command (current step)
+    lookahead_fine  (3*Hf)     — fine-grained future targets at t+1..t+Hf steps
+                                 (dt = control_dt = 0.02 s; aligns with FIFO:
+                                  lookahead_fine[k] pairs with cmd_delta[k])
+    lookahead_coarse(3*Hc)     — coarse future targets beyond the FIFO horizon
+                                 (dt = lookahead_coarse_dt, offset after fine end;
+                                  default: t+0.20, t+0.30, t+0.40, t+0.50 s)
+    cmd_delta_hist  (7*D)      — pending setpoints minus current q (oldest→newest)
+                                 tells the policy what movement is already queued
+    traj_onehot    (|pool|)    — one-hot trajectory type (reduces critic variance)
 """
 
 from __future__ import annotations
@@ -107,8 +112,17 @@ class EnvConfig:
     seed: int = 0
 
     # ── observation ───────────────────────────────────────────────────────
-    lookahead_horizon: int = 5         # number of future target positions in obs
-    lookahead_dt: float = 0.10         # time between lookahead samples (s)
+    # Two-scale lookahead:
+    #   Fine  (Hf points, dt=control_dt):    covers the FIFO window step-by-step.
+    #         lookahead_fine[k] = target at t+(k+1)*dt, pairing exactly with
+    #         cmd_delta_history[k] which executes at t+k+1.
+    #   Coarse (Hc points, dt=lookahead_coarse_dt): extends beyond the FIFO to
+    #         give the policy trajectory-trend info for pre-positioning.
+    #         Starts at t + Hf*dt_fine + dt_coarse (no overlap with fine).
+    lookahead_horizon: int = 5         # Hf: fine steps covering t+1..t+D
+    lookahead_dt: float = 0.02         # fine step size (= 1 control step = 0.02 s)
+    lookahead_coarse_horizon: int = 4  # Hc: coarse steps beyond the FIFO
+    lookahead_coarse_dt: float = 0.10  # coarse step size (default: 0.1 s = 5 steps)
 
     # ── trajectory blend-in ───────────────────────────────────────────────
     # Smoothstep blend from home pose to trajectory over this many seconds.
@@ -287,7 +301,13 @@ class FrankaTrackingEnv(gym.Env):
         )
 
         # ── Residual: non-accumulating position offset (no individual delay) ──
-        correction = residual * self.control_dt if self.cfg.use_residual else np.zeros(7)
+        # correction is a direct joint-space position offset in radians.
+        # Do NOT multiply by control_dt: residual_scale already sets the
+        # magnitude in rad, and multiplying by dt (0.02) would shrink the
+        # maximum EE correction from ~39 mm to ~0.8 mm — too small to
+        # compensate the 26 mm delay-induced lag (needs residual_norm > 6,
+        # which is impossible given policy output is clipped to ±1).
+        correction = residual if self.cfg.use_residual else np.zeros(7)
         self._q_setpoint = np.clip(self._ik_q_setpoint + correction, jnt_lo, jnt_hi)
 
         # ── Whole-pipeline delay: IK + residual travel through the same FIFO ──
@@ -416,13 +436,30 @@ class FrankaTrackingEnv(gym.Env):
         if self.trajectory is None:
             target_pos = ee_meas.copy()
             target_vel = np.zeros(3)
-            lookahead = np.tile(ee_meas, self.cfg.lookahead_horizon)
+            # No trajectory: fill both scales with current EE position
+            lookahead_fine   = np.tile(ee_meas, self.cfg.lookahead_horizon)
+            lookahead_coarse = np.tile(ee_meas, self.cfg.lookahead_coarse_horizon)
         else:
             target_pos, target_vel = self._desired(self._t)
-            lookahead = np.concatenate([
+
+            # Fine scale: lookahead_fine[k] = target at t+(k+1)*lookahead_dt
+            # Starts at i=1 so fine[k] aligns with cmd_delta_history[k],
+            # giving the critic the target at each step the FIFO will execute.
+            lookahead_fine = np.concatenate([
                 self._desired(self._t + i * self.cfg.lookahead_dt)[0]
-                for i in range(self.cfg.lookahead_horizon)
+                for i in range(1, self.cfg.lookahead_horizon + 1)
             ])
+
+            # Coarse scale: extends the horizon beyond the FIFO window for
+            # trajectory-trend visibility.  Starts at t + fine_end + coarse_dt
+            # so there is no overlap with the fine block.
+            fine_end = self.cfg.lookahead_horizon * self.cfg.lookahead_dt
+            lookahead_coarse = np.concatenate([
+                self._desired(self._t + fine_end + i * self.cfg.lookahead_coarse_dt)[0]
+                for i in range(1, self.cfg.lookahead_coarse_horizon + 1)
+            ]) if self.cfg.lookahead_coarse_horizon > 0 else np.empty(0)
+
+        lookahead = np.concatenate([lookahead_fine, lookahead_coarse])
 
         pos_err = target_pos - ee_meas
         ik_qdot = (

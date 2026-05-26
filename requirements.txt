@@ -1,12 +1,21 @@
-mujoco>=3.0
-gymnasium>=0.29
+# Core RL / simulation
+mujoco>=3.0,<4.0
+gymnasium>=1.0
 stable-baselines3>=2.3
 torch>=2.0
-numpy
-matplotlib
-pyyaml
-scipy
-imageio
-imageio-ffmpeg
-tqdm
-tensorboard
+
+# Numerics / viz
+numpy>=1.24
+matplotlib>=3.7
+scipy>=1.10
+
+# Config / logging / video
+pyyaml>=6.0
+imageio>=2.28
+imageio-ffmpeg>=0.4
+tqdm>=4.64
+tensorboard>=2.13
+
+# Tested with:
+# mujoco==3.8.1  gymnasium==1.2.3  stable-baselines3==2.8.0
+# torch==2.4.0+cu121  numpy==2.4.6  Python==3.11.12

@@ -33,6 +33,10 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from ee_tracking.env.franka_tracking_env import EnvConfig, FrankaTrackingEnv
 from ee_tracking.env.disturbances import DisturbanceConfig
+from ee_tracking.policies.gelu_policy import POLICY_REGISTRY
+from ee_tracking.policies.transformer_policy import TRANSFORMER_POLICY_REGISTRY
+POLICY_REGISTRY = {**POLICY_REGISTRY, **TRANSFORMER_POLICY_REGISTRY}
+from ee_tracking.policies.delay_buffer import DelayAwareRolloutBuffer
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +67,9 @@ def env_config_from_dict(d: dict) -> EnvConfig:
         bonus_sharpness=d.get("bonus_sharpness", 50.0),
         fail_pos_err=d.get("fail_pos_err", 0.30),
         lookahead_horizon=d.get("lookahead_horizon", 5),
-        lookahead_dt=d.get("lookahead_dt", 0.10),
+        lookahead_dt=d.get("lookahead_dt", 0.02),
+        lookahead_coarse_horizon=d.get("lookahead_coarse_horizon", 4),
+        lookahead_coarse_dt=d.get("lookahead_coarse_dt", 0.10),
         action_filter_hz=d.get("action_filter_hz", 0.0),
         disturbance=DisturbanceConfig(
             obs_pos_noise=dist.get("obs_pos_noise", 0.005),
@@ -159,15 +165,77 @@ def main():
     vec_env = SubprocVecEnv([make_env] * n_envs)
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
-    # PPO
-    policy_kwargs = dict(
-        net_arch=train_d.get("policy_kwargs", {}).get("net_arch", [256, 256])
-    )
+    # PPO — resolve custom policy names through the registry
+    policy_name = train_d.get("policy", "MlpPolicy")
+    policy_cls = POLICY_REGISTRY.get(policy_name, policy_name)  # fall back to SB3 string
+
+    pk = train_d.get("policy_kwargs", {})
+
+    # net_arch can be a flat list [256,256] (symmetric) or a dict
+    # {pi: [...], vf: [...]} (asymmetric actor/critic).
+    # For transformer policies, there is no "net_arch" key — the entire
+    # pk dict (minus optimizer_kwargs) is the architecture config, passed
+    # through as net_arch so DelayTransformerPolicy._build_mlp_extractor
+    # can read d_model, nhead, use_pos_embed, pair_tokens, etc.
+    if "net_arch" in pk:
+        net_arch = pk["net_arch"]   # MLP-style: explicit net_arch key
+    else:
+        # Transformer-style: pass all non-optimizer kwargs as the arch dict
+        net_arch = {k: v for k, v in pk.items() if k != "optimizer_kwargs"}
+
+    policy_kwargs: dict = {"net_arch": net_arch}
+
+    # Pass optimizer kwargs (e.g. weight_decay) directly to the policy's
+    # Adam optimizer.  SB3 ActorCriticPolicy forwards optimizer_kwargs to
+    # torch.optim.Adam at construction time.
+    if "optimizer_kwargs" in pk:
+        policy_kwargs["optimizer_kwargs"] = pk["optimizer_kwargs"]
+
+    # Delay-aware rollout buffer: shifts rewards so action(t) is credited with
+    # reward(t+D) rather than reward(t+1).  Only valid when the state does NOT
+    # already encode the delay buffer (cmd_delta_history).  With cmd_delta_history
+    # in the obs, V(s_t) already accounts for queued rewards, and the shift
+    # creates a mismatch between V (trained on actual returns) and the shifted
+    # advantage target — hurting EV.  Default: off when cmd_delta_history present.
+    cmd_delay = env_config.disturbance.cmd_delay
+    use_delay_aware_gae = train_d.get("delay_aware_gae", False)
+    if use_delay_aware_gae and cmd_delay > 0:
+        rollout_buffer_class  = DelayAwareRolloutBuffer
+        rollout_buffer_kwargs = {"cmd_delay": cmd_delay}
+        print(f"  delay-aware GAE: ON  cmd_delay={cmd_delay} → "
+              f"action(t) credited with reward(t+{cmd_delay})")
+    else:
+        rollout_buffer_class  = None
+        rollout_buffer_kwargs = None
+        if cmd_delay > 0:
+            print(f"  delay-aware GAE: OFF (cmd_delta_history in obs restores Markov property)")
+
+    # LR schedule: constant by default; linear decay if lr_final is set.
+    # SB3 accepts a callable f(progress_remaining) → float where
+    # progress_remaining goes from 1.0 (start) to 0.0 (end of training).
+    lr_initial  = train_d.get("learning_rate", 3e-4)
+    lr_final    = train_d.get("lr_final", None)
+    lr_schedule = train_d.get("lr_schedule", "linear")   # "linear" | "cosine"
+    if lr_final is not None:
+        import math as _math
+        _lr_i, _lr_f = float(lr_initial), float(lr_final)
+        if lr_schedule == "cosine":
+            def learning_rate(progress_remaining: float) -> float:
+                t = 1.0 - progress_remaining          # 0→1 as training progresses
+                cos_factor = 0.5 * (1.0 - _math.cos(_math.pi * t))
+                return _lr_i + (_lr_f - _lr_i) * cos_factor
+            print(f"  LR schedule: {_lr_i:.2e} → {_lr_f:.2e} (cosine decay)")
+        else:
+            def learning_rate(progress_remaining: float) -> float:
+                return _lr_f + (_lr_i - _lr_f) * progress_remaining
+            print(f"  LR schedule: {_lr_i:.2e} → {_lr_f:.2e} (linear decay)")
+    else:
+        learning_rate = float(lr_initial)
 
     model = PPO(
-        policy=train_d.get("policy", "MlpPolicy"),
+        policy=policy_cls,
         env=vec_env,
-        learning_rate=train_d.get("learning_rate", 3e-4),
+        learning_rate=learning_rate,
         n_steps=train_d.get("n_steps", 2048),
         batch_size=train_d.get("batch_size", 512),
         n_epochs=train_d.get("n_epochs", 10),
@@ -178,6 +246,8 @@ def main():
         vf_coef=train_d.get("vf_coef", 0.5),
         max_grad_norm=train_d.get("max_grad_norm", 0.5),
         policy_kwargs=policy_kwargs,
+        rollout_buffer_class=rollout_buffer_class,
+        rollout_buffer_kwargs=rollout_buffer_kwargs,
         tensorboard_log=str(out_dir / "tb"),
         verbose=1,
         seed=seed,

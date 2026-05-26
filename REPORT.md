@@ -78,15 +78,32 @@ The lookahead alignment is intentional: `lookahead_dt × lookahead_horizon = 0.1
 
 ## Current Results
 
-Training on the new formulation (`results/run_delay5`, 1.5 M steps, 100 ms delay):
+All numbers are deterministic post-training eval RMSE (mm). IK baseline uses 100 ms delay.
+
+### Best confirmed models
+
+| Model | moving_target | circle | figure8 | Notes |
+|---|---|---|---|---|
+| IK + 100ms delay | 38.1 mm | 12.1 mm | 7.7 mm | baseline to beat |
+| PPO 5M, single-pool, linear LR | 20.5 mm | 13.5 mm ❌ | 13.0 mm ❌ | hurts unseen trajectories |
+| **PPO 500K, mixed pool, cosine LR** | **26.2 mm** | **7.9 mm ✓** | **5.9 mm ✓** | beats IK on all 3 at 500K |
+| **PPO 500K, rs=0.12, mixed pool** | **22.9 mm** | 12.0 mm | 10.1 mm | best moving_target; under-converged |
+
+### Key metric progression (moving_target eval)
 
 ```
-pos_err_mm during training: 35–40 mm  (vs IK baseline ~44 mm)
-explained_variance: 0.92              (critic well-calibrated)
-std: 1.18                             (still converging)
+IK + delay:              38.1 mm   (fixed reference)
+5M single-pool:          20.5 mm   (+46% over IK)
+500K mixed-pool:         26.2 mm   (+31% — beats IK on circle/fig8 too)
+500K rs=0.12 mixed:      22.9 mm   (+40% — best 500K result; needs more steps)
+Overnight target:       <16.0 mm   (rs=0.12 at 5–10M steps)
 ```
 
-The policy is already achieving ~10–20% improvement over IK mid-training. Final evaluation pending completion of the training run.
+### Training dynamics (confirmed patterns)
+
+- **Explained Variance (EV)**: rises from ~0.86 (5M single-pool) to 0.982 (500K mixed pool) — mixed pool dramatically stabilises the critic via clean circle/figure8 episodes
+- **Bang-bang policy**: 47–87% of post-Tanh actions have |a| > 0.9; the policy always saturates because the action penalty is negligible at rs=0.05
+- **LR decay is critical**: constant LR 1e-3 → EV=0.86; cosine 1e-3→1e-4 → EV=0.98 at 500K
 
 ---
 
@@ -95,18 +112,28 @@ The policy is already achieving ~10–20% improvement over IK mid-training. Fina
 | Decision | Rationale |
 |---|---|
 | Non-accumulating residual offset | Wrong corrections at step t are fully self-correcting at t+1; prevents drift windup |
-| Whole-pipeline delay (both IK + residual) | Physically accurate; gives IK a real weakness the policy can exploit |
-| Lookahead covers delay window exactly | Policy sees the target position at the exact moment each command executes |
-| `moving_target` only in training pool | Circle and figure-8 are too predictable for IK; `moving_target` is where delay hurts most |
-| `cmd_delta_history` in observation | Restores the Markov property: policy knows what commands are in-flight in the buffer |
-| Baked Butterworth vs post-hoc filter | Policy trains against its own filtered output, learning to work with the filter rather than against it |
-| Probe script for fast iteration | 7 configs × 300k steps ≈ 15 min; ruled out hyperparameter causes before redesigning the task |
+| Whole-pipeline delay (both IK + residual) | Physically accurate; gives IK a real weakness the policy can exploit; residual-only delay gave zero learning |
+| Lookahead covers delay window exactly | Fine lookahead (5×0.02s=0.1s) gives oracle knowledge of target position at each command's execution time |
+| **Mixed trajectory pool** | Biggest single finding: EV 0.888→0.982, beats IK on circle/figure8 at 500K; single-pool models hurt unseen trajectories |
+| `cmd_delta_history` in observation | Restores Markov property: policy knows what commands are in-flight; `delay_aware_gae` must stay OFF with this |
+| No smoothness/jerk penalty | Predictive impulse control is inherently jerky; penalising jerk penalises delay compensation directly |
+| cosine LR 1e-3→1e-4 | Probe-confirmed better than linear; stays warm for exploration then converges sharply |
+| n_envs=20 | 3–5× wall-clock speedup; equal total gradient steps vs n_envs=10; allows 9 runs per 8-hour budget |
+| Action filter disabled | 2 Hz Butterworth adds ~5.6 steps of group delay on top of 5-step FIFO; doubles effective latency |
 
 ---
 
 ## Limitations and Next Steps
 
-- **Oracle lookahead** is unrealistic for real hardware. A natural extension is replacing the ground-truth future positions with a learned predictor or Kalman smoother over observed target history.
-- **Sim-to-real gap**: the MuJoCo model perfectly matches the simulated robot. Real deployment would require domain randomization over inertia, joint damping, and contact parameters.
-- **Single trajectory type in training**: the policy may not generalise to circle or figure-8 under delay. Expanding the training pool (with appropriate curriculum) is the next step after the primary benchmark is solved.
-- **Policy not yet converged**: `std ≈ 1.18` at 1.5 M steps suggests more training time or a lower entropy coefficient would help.
+### Immediate (overnight sweep in progress)
+- **Optimal residual_scale at 5M**: rs=0.12 is the hypothesis; sweep tests rs ∈ {0.05, 0.08, 0.10, 0.12, 0.15} with the full confirmed recipe. Results in `results/sweep/` by morning.
+- **Step depth**: rs=0.12 at 10M (vs 5M) tested overnight. Target: <16mm moving_target, matching or beating IK floor on circle/figure8.
+
+### Medium-term
+- **Oracle lookahead → real predictor**: the fine lookahead provides ground-truth future positions — unrealistic for hardware. Replace with a Kalman smoother or learned predictor over observed target history. The architecture is already set up to swap this in (same obs dimension).
+- **Scale-invariant w_residual**: current penalty is `−wr × rs² × ‖action‖²`; the rs² factor makes tuning inconsistent across residual_scale values. Fix: `−wr × ‖action‖²` makes wr interpretation scale-independent.
+- **Post-hoc smoothing for hardware**: the bang-bang policy produces jerky joint commands (47–87% saturated). For real Franka deployment, a 2 Hz Butterworth applied post-hoc at inference (not baked into training) would smooth commands without adding training-time latency.
+
+### Long-term
+- **Sim-to-real gap**: MuJoCo perfectly matches the simulated robot. Real deployment needs domain randomisation over inertia, joint damping, and contact parameters.
+- **Curriculum over delay**: training and evaluating at a fixed 100 ms delay. Randomising delay over [0, 150 ms] during training would improve robustness to network jitter.

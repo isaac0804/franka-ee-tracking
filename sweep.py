@@ -1,356 +1,238 @@
 #!/usr/bin/env python3
-"""Overnight hyperparameter sweep for residual PPO on moving_target.
-
-Runs all configs sequentially, evaluates each one, and keeps a live
-ranked summary in results/sweep/summary.csv.
+"""Overnight hyperparameter sweep — runs configs sequentially, logs results.
 
 Usage:
-    python sweep.py                        # full sweep, 2M steps/run (~7–8 h)
-    python sweep.py --timesteps 500000     # quick smoke-test (~2 h)
-    python sweep.py --dry-run              # print configs and estimated time, exit
+    python sweep.py                        # run all 5 configs
+    python sweep.py --runs base_5M lrdecay_5M   # run a subset by name
 
-Resumable: any run whose final_model.zip already exists is skipped.
+Results land in results/sweep/<run_name>/.
+A summary table is printed at the end and saved to results/sweep/summary.csv.
+
+Each config is 5M steps (~35 min each); total wall time ~3 hours.
 """
 from __future__ import annotations
 
 import argparse
-import copy
+import csv
 import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-import yaml
-
 # ---------------------------------------------------------------------------
-# Base config (mirrors default.yaml — the sweep overrides values on top)
+# Run definitions
 # ---------------------------------------------------------------------------
 
-BASE = {
-    "env": {
-        "control_hz": 50.0,
-        "episode_seconds": 6.0,
-        "randomize_trajectory": True,
-        "trajectory_pool": ["moving_target"],
-        "residual_scale": 0.05,
-        "use_residual": True,
-        "w_pos": 5.0,
-        "w_vel": 0.1,
-        "w_residual": 0.5,
-        "w_jerk": 0.001,
-        "w_smooth": 0.05,
-        "w_delta_pos": 0.0,
-        "w_bonus": 0.0,
-        "bonus_sharpness": 0.0,
-        "fail_pos_err": 0.30,
-        "lookahead_horizon": 5,
-        "lookahead_dt": 0.10,
-        "action_filter_hz": 2.0,
-        "disturbance": {
-            "obs_pos_noise": 0.005,
-            "obs_jnt_noise": 0.002,
-            "cmd_delay": 5,   # 100 ms whole-pipeline delay (IK + residual equally)
-        },
-    },
-    "train": {
-        "total_timesteps": 2_000_000,
-        "n_envs": 10,
-        "policy": "MlpPolicy",
-        "policy_kwargs": {"net_arch": [256, 256]},
-        "learning_rate": 3e-4,
-        "n_steps": 2048,
-        "batch_size": 512,
-        "n_epochs": 10,
-        "gamma": 0.97,
-        "gae_lambda": 0.95,
-        "clip_range": 0.2,
-        "ent_coef": 0.01,
-        "vf_coef": 0.5,
-        "max_grad_norm": 0.5,
-        "seed": 0,
-    },
-}
+SWEEP_DIR  = Path("ee_tracking/configs/sweep")
+OUT_BASE   = Path("results/sweep")
 
-# ---------------------------------------------------------------------------
-# Sweep configs
-# Each entry: (name, env_overrides, train_overrides)
-#
-# Groups:
-#   G1  residual_scale × w_residual grid  — the core tradeoff
-#   G2  learning rate
-#   G3  network architecture
-#   G4  lookahead horizon/dt
-#   G5  action delay
-#   G6  reward weights (w_pos, w_smooth)
-# ---------------------------------------------------------------------------
-
-CONFIGS: list[tuple[str, dict, dict]] = [
-
-    # ── G1: residual_scale × w_residual ──────────────────────────────────
-    # baseline lives at rs005 / wr05
-    ("baseline",        {"residual_scale": 0.05, "w_residual": 0.5},  {}),
-
-    ("rs002_wr01",      {"residual_scale": 0.02, "w_residual": 0.1},  {}),
-    ("rs002_wr03",      {"residual_scale": 0.02, "w_residual": 0.3},  {}),
-    ("rs002_wr05",      {"residual_scale": 0.02, "w_residual": 0.5},  {}),
-    ("rs002_wr10",      {"residual_scale": 0.02, "w_residual": 1.0},  {}),
-
-    ("rs005_wr01",      {"residual_scale": 0.05, "w_residual": 0.1},  {}),
-    ("rs005_wr03",      {"residual_scale": 0.05, "w_residual": 0.3},  {}),
-    ("rs005_wr10",      {"residual_scale": 0.05, "w_residual": 1.0},  {}),
-
-    ("rs008_wr01",      {"residual_scale": 0.08, "w_residual": 0.1},  {}),
-    ("rs008_wr03",      {"residual_scale": 0.08, "w_residual": 0.3},  {}),
-    ("rs008_wr05",      {"residual_scale": 0.08, "w_residual": 0.5},  {}),
-    ("rs008_wr10",      {"residual_scale": 0.08, "w_residual": 1.0},  {}),
-
-    ("rs012_wr01",      {"residual_scale": 0.12, "w_residual": 0.1},  {}),
-    ("rs012_wr03",      {"residual_scale": 0.12, "w_residual": 0.3},  {}),
-    ("rs012_wr05",      {"residual_scale": 0.12, "w_residual": 0.5},  {}),
-    ("rs012_wr10",      {"residual_scale": 0.12, "w_residual": 1.0},  {}),
-
-    # ── G2: learning rate ────────────────────────────────────────────────
-    ("lr_1e4",          {},  {"learning_rate": 1e-4}),
-    ("lr_1e3",          {},  {"learning_rate": 1e-3}),
-
-    # ── G3: network architecture ─────────────────────────────────────────
-    ("net_128x128",     {},  {"policy_kwargs": {"net_arch": [128, 128]}}),
-    ("net_256x256x256", {},  {"policy_kwargs": {"net_arch": [256, 256, 256]}}),
-
-    # ── G4: lookahead ────────────────────────────────────────────────────
-    # ablation: does lookahead actually help?
-    ("look_none",       {"lookahead_horizon": 1, "lookahead_dt": 0.50}, {}),  # only current step
-    ("look_near",       {"lookahead_horizon": 3, "lookahead_dt": 0.05}, {}),  # 0.15 s ahead
-    ("look_far",        {"lookahead_horizon": 8, "lookahead_dt": 0.10}, {}),  # 0.8 s ahead
-    ("look_wide",       {"lookahead_horizon": 5, "lookahead_dt": 0.20}, {}),  # 1.0 s ahead
-
-    # ── G5: command delay ────────────────────────────────────────────────
-    # Baseline is cmd_delay=5 (100 ms).  Ablate to understand sensitivity.
-    # delay=0: IK is reactive — no delay advantage for lookahead
-    # delay=3: 60 ms — IK degrades to ~32 mm; residual has moderate room
-    # delay=8: 160 ms — extreme delay; tests policy's prediction horizon
-    ("delay_0",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "cmd_delay": 0}}, {}),
-    ("delay_3",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "cmd_delay": 3}}, {}),
-    ("delay_8",         {"disturbance": {"obs_pos_noise": 0.005, "obs_jnt_noise": 0.002, "cmd_delay": 8}}, {}),
-
-    # ── G6: reward weights ───────────────────────────────────────────────
-    ("wpos_3",          {"w_pos": 3.0},   {}),
-    ("wpos_8",          {"w_pos": 8.0},   {}),
-    ("wsmooth_0",       {"w_smooth": 0.0}, {}),
-    ("wsmooth_20",      {"w_smooth": 0.2}, {}),
+RUNS: list[tuple[str, str, str]] = [
+    # (name,               config_file,                   description)
+    ("base_5M",
+     "base_5M.yaml",
+     "control — 5M steps, all else baseline"),
+    ("lrdecay_5M",
+     "lrdecay_5M.yaml",
+     "LR 1e-3 → 1e-4 linear decay"),
+    ("gamma99_5M",
+     "gamma99_5M.yaml",
+     "gamma 0.97 → 0.99"),
+    ("nosmooth_5M",
+     "nosmooth_5M.yaml",
+     "w_smooth=0, w_jerk=0 (unconstrained corrections)"),
+    ("lrdecay_gamma99_5M",
+     "lrdecay_gamma99_5M.yaml",
+     "LR decay + gamma=0.99 (combo best-guess)"),
 ]
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into a copy of base."""
-    result = copy.deepcopy(base)
-    for k, v in override.items():
-        if isinstance(v, dict) and isinstance(result.get(k), dict):
-            result[k] = deep_merge(result[k], v)
+def read_tb_metrics(run_dir: Path) -> dict:
+    """Pull final and best pos_err + final EV/KL from TensorBoard logs."""
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    except ImportError:
+        return {}
+
+    tb_dir = run_dir / "tb" / "PPO_1"
+    if not tb_dir.exists():
+        return {}
+
+    ea = EventAccumulator(str(tb_dir))
+    ea.Reload()
+
+    def last(tag: str) -> float:
+        try:
+            evs = ea.Scalars(tag)
+            return evs[-1].value if evs else float("nan")
+        except KeyError:
+            return float("nan")
+
+    def best_min(tag: str) -> float:
+        try:
+            return min(e.value for e in ea.Scalars(tag))
+        except KeyError:
+            return float("nan")
+
+    return {
+        "pos_err_final": last("tracking/pos_err_mm"),
+        "pos_err_best":  best_min("tracking/pos_err_mm"),
+        "EV_final":      last("train/explained_variance"),
+        "KL_final":      last("train/approx_kl"),
+        "residual_norm": last("tracking/residual_norm"),
+    }
+
+
+def fmt(v: float, dec: int = 2) -> str:
+    return f"{v:.{dec}f}" if v == v else "nan"
+
+
+def print_summary(results: list[dict]) -> None:
+    if not results:
+        return
+    header = (f"{'run':<26} {'final mm':>9} {'best mm':>9}"
+              f" {'EV':>7} {'KL':>7} {'time':>8}")
+    sep = "=" * len(header)
+    print(f"\n{sep}\nSWEEP SUMMARY\n{sep}")
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        if r.get("status") == "ok":
+            line = (
+                f"{r['name']:<26}"
+                f" {fmt(r.get('pos_err_final', float('nan'))):>9}"
+                f" {fmt(r.get('pos_err_best',  float('nan'))):>9}"
+                f" {fmt(r.get('EV_final',  float('nan')), 3):>7}"
+                f" {fmt(r.get('KL_final',  float('nan')), 3):>7}"
+                f" {r.get('elapsed_min', 0):>7.1f}m"
+            )
         else:
-            result[k] = v
-    return result
+            line = f"{r['name']:<26}  FAILED  ({r.get('status','?')})"
+        print(line)
+    print(sep)
+    print(f"\n  Reference:  IK+delay=37.2 mm  |"
+          f"  policy@500K=27.4 mm  |  IK_floor=14.7 mm")
 
 
-def build_cfg(env_override: dict, train_override: dict, timesteps: int) -> dict:
-    cfg = deep_merge(BASE, {"env": env_override, "train": train_override})
-    cfg["train"]["total_timesteps"] = timesteps
-    return cfg
-
-
-def run_training(cfg: dict, out_dir: Path) -> tuple[bool, float, str]:
-    """Write config yaml, call train.py, return (success, elapsed_s, stdout)."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cfg_path = out_dir / "sweep_config.yaml"
-    with open(cfg_path, "w") as f:
-        yaml.dump(cfg, f)
-
-    t0 = time.time()
-    result = subprocess.run(
-        [sys.executable, "train.py", "--config", str(cfg_path), "--out", str(out_dir)],
-        capture_output=True, text=True,
-    )
-    elapsed = time.time() - t0
-    stdout = result.stdout + result.stderr
-    return result.returncode == 0, elapsed, stdout
-
-
-def run_eval(model_path: Path, eval_dir: Path, trajectory_pool: list[str]) -> dict | None:
-    """Call evaluate.py ablation and return the JSON results."""
-    result = subprocess.run(
-        [sys.executable, "evaluate.py", "ablation",
-         "--model", str(model_path),
-         "--trajectories", "moving_target",
-         "--out", str(eval_dir)],
-        capture_output=True, text=True,
-    )
-    json_path = eval_dir / "ablation.json"
-    if json_path.exists():
-        with open(json_path) as f:
-            return json.load(f)
-    return None
-
-
-def parse_final_pos_err(stdout: str) -> float | None:
-    """Extract last pos_err_mm value from training stdout."""
-    val = None
-    for line in stdout.splitlines():
-        if "pos_err_mm" in line:
-            try:
-                val = float(line.split("|")[-2].strip())
-            except Exception:
-                pass
-    return val
-
-
-def write_summary(rows: list[dict], path: Path):
-    import csv
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def print_leaderboard(rows: list[dict]):
-    finished = [r for r in rows if r["improvement_pct"] != "FAILED"]
-    if not finished:
-        return
-    finished.sort(key=lambda r: -float(r["improvement_pct"]))
-    print("\n" + "=" * 72)
-    print(f"  {'RANK':<5} {'name':<20} {'IK mm':>7} {'res mm':>8} {'Δ %':>8}  notes")
-    print("=" * 72)
-    for i, r in enumerate(finished, 1):
-        marker = " ✓" if float(r["improvement_pct"]) > 0 else ""
-        print(f"  {i:<5} {r['name']:<20} {float(r['ik_mm']):>7.1f} "
-              f"{float(r['res_mm']):>8.1f} {float(r['improvement_pct']):>+7.1f}%{marker}")
-    print("=" * 72)
-    failed = [r["name"] for r in rows if r["improvement_pct"] == "FAILED"]
-    if failed:
-        print(f"  FAILED: {', '.join(failed)}")
-    print()
+def save_summary(results: list[dict], out: Path) -> None:
+    keys = ["name", "status", "pos_err_final", "pos_err_best",
+            "EV_final", "KL_final", "residual_norm", "elapsed_min",
+            "config", "description"]
+    with open(out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(results)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(description="Overnight hyperparameter sweep")
-    parser.add_argument("--timesteps", type=int, default=2_000_000,
-                        help="Steps per run (default 2M ≈ 13 min each)")
-    parser.add_argument("--out", default="results/sweep",
-                        help="Root output directory")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print configs and time estimate only")
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runs", nargs="+", default=None,
+                        help="Subset of run names (default: all)")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    out_root = Path(args.out)
-    summary_path = out_root / "summary.csv"
-    n = len(CONFIGS)
-    secs_per_run = args.timesteps / 2500  # empirical ~2500 steps/sec on this machine
-    total_h = n * secs_per_run / 3600
+    selected = RUNS
+    if args.runs:
+        names = set(args.runs)
+        selected = [r for r in RUNS if r[0] in names]
+        if not selected:
+            print(f"No matching runs for: {args.runs}")
+            sys.exit(1)
+
+    OUT_BASE.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"  Sweep: {n} configs × {args.timesteps/1e6:.1f}M steps")
-    print(f"  Estimated time: {total_h:.1f} h  ({secs_per_run/60:.0f} min/run)")
-    print(f"  Output: {out_root}")
-    print(f"{'='*60}\n")
+    print(f"  SWEEP: {len(selected)} runs × 5M steps  (~35 min/run)")
+    print(f"  Output: {OUT_BASE.resolve()}")
+    print(f"{'='*60}")
+    for name, _, desc in selected:
+        print(f"  • {name:<26}  {desc}")
+    print()
 
-    if args.dry_run:
-        for i, (name, env_ov, train_ov) in enumerate(CONFIGS, 1):
-            overrides = {**env_ov, **train_ov}
-            desc = ", ".join(f"{k}={v}" for k, v in overrides.items()) or "(baseline)"
-            print(f"  {i:2d}. {name:<22}  {desc}")
-        return
+    all_results: list[dict] = []
+    sweep_t0 = time.time()
 
-    rows: list[dict] = []
+    for idx, (name, cfg_file, desc) in enumerate(selected, 1):
+        cfg_path = SWEEP_DIR / cfg_file
+        out_dir  = OUT_BASE / name
+        log_path = out_dir / "train.log"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load existing summary for resume
-    if summary_path.exists():
-        import csv
-        with open(summary_path) as f:
-            rows = list(csv.DictReader(f))
-        done_names = {r["name"] for r in rows}
-        print(f"Resuming: {len(done_names)} runs already done\n")
-    else:
-        done_names = set()
+        cmd = [sys.executable, "train.py",
+               "--config", str(cfg_path),
+               "--out",    str(out_dir)]
 
-    t_sweep_start = time.time()
+        print(f"\n{'─'*60}")
+        print(f"[{idx}/{len(selected)}]  {name}")
+        print(f"   desc   : {desc}")
+        print(f"   config : {cfg_path}")
+        print(f"   log    : {log_path}")
 
-    for idx, (name, env_ov, train_ov) in enumerate(CONFIGS, 1):
-        run_dir = out_root / name
-        model_path = run_dir / "final_model.zip"
-
-        if name in done_names and model_path.exists():
-            print(f"[{idx}/{n}] {name}  — skipped (already done)")
+        if args.dry_run:
+            print("   [DRY RUN — skipped]")
             continue
 
-        cfg = build_cfg(env_ov, train_ov, args.timesteps)
-        overrides_desc = ", ".join(
-            f"{k}={v}" for d in (env_ov, train_ov) for k, v in d.items()
-        ) or "baseline"
+        result: dict = {"name": name, "config": cfg_file, "description": desc}
+        t0 = time.time()
 
-        elapsed_so_far = time.time() - t_sweep_start
-        remaining_runs = n - idx
-        eta_h = remaining_runs * secs_per_run / 3600
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            log_path.write_text(proc.stdout)
 
-        print(f"\n[{idx}/{n}] {name}  —  {overrides_desc}")
-        print(f"  Elapsed: {elapsed_so_far/3600:.1f}h  |  ETA: {eta_h:.1f}h remaining")
+            elapsed = time.time() - t0
+            result["elapsed_min"] = elapsed / 60.0
 
-        success, elapsed, stdout = run_training(cfg, run_dir)
-        final_pos_err = parse_final_pos_err(stdout)
+            # Print key lines so the terminal isn't silent for 35 min
+            for line in proc.stdout.splitlines():
+                s = line.strip()
+                if any(s.startswith(p) for p in (
+                    "| total_timesteps", "| pos_err_mm",
+                    "| explained_variance", "Done in"
+                )):
+                    print(f"   {s}")
 
-        row: dict = {
-            "name": name,
-            "group": name.split("_")[0] if "_" in name else name,
-            "overrides": overrides_desc,
-            "train_ok": success,
-            "train_time_s": f"{elapsed:.0f}",
-            "final_pos_err_mm": f"{final_pos_err:.1f}" if final_pos_err else "?",
-            "ik_mm": "FAILED",
-            "res_mm": "FAILED",
-            "improvement_pct": "FAILED",
-        }
-
-        if not success:
-            print(f"  ✗ Training failed after {elapsed:.0f}s")
-            print(stdout[-800:])
-        else:
-            print(f"  ✓ Training done in {elapsed:.0f}s  (final pos_err={final_pos_err:.1f}mm)"
-                  if final_pos_err else f"  ✓ Training done in {elapsed:.0f}s")
-
-            eval_dir = run_dir / "eval"
-            pool = cfg["env"].get("trajectory_pool", ["moving_target"])
-            eval_results = run_eval(model_path, eval_dir, pool)
-
-            if eval_results and "moving_target" in eval_results:
-                mt = eval_results["moving_target"]
-                row["ik_mm"] = f"{mt['ik_settled_rmse_mm']:.2f}"
-                row["res_mm"] = f"{mt['residual_settled_rmse_mm']:.2f}"
-                row["improvement_pct"] = f"{mt['improvement_pct']:.2f}"
-                marker = " ✓" if mt["improvement_pct"] > 0 else ""
-                print(f"  moving_target:  IK={mt['ik_settled_rmse_mm']:.1f}mm  "
-                      f"residual={mt['residual_settled_rmse_mm']:.1f}mm  "
-                      f"Δ={mt['improvement_pct']:+.1f}%{marker}")
+            if proc.returncode == 0:
+                result["status"] = "ok"
+                metrics = read_tb_metrics(out_dir)
+                result.update(metrics)
+                print(f"\n   ✓  {elapsed/60:.1f} min  |"
+                      f"  pos_err {fmt(metrics.get('pos_err_final', float('nan')))} mm"
+                      f"  (best {fmt(metrics.get('pos_err_best', float('nan')))} mm)"
+                      f"  EV={fmt(metrics.get('EV_final', float('nan')), 3)}")
             else:
-                print("  ✗ Eval failed or missing moving_target results")
+                result["status"] = f"exit_{proc.returncode}"
+                print(f"\n   ✗  FAILED exit={proc.returncode}")
+                print('\n'.join(proc.stdout.splitlines()[-20:]))
 
-        rows.append(row)
-        write_summary(rows, summary_path)
+        except Exception as exc:
+            result["status"] = f"exc:{exc}"
+            result["elapsed_min"] = (time.time() - t0) / 60.0
+            print(f"\n   ✗  EXCEPTION: {exc}")
 
-    # Final leaderboard
-    total_elapsed = time.time() - t_sweep_start
-    print(f"\nAll done in {total_elapsed/3600:.1f}h")
-    print_leaderboard(rows)
-    print(f"Summary saved → {summary_path}")
+        all_results.append(result)
+        # Incremental save so partial results survive a crash
+        save_summary(all_results, OUT_BASE / "summary.csv")
+
+    print_summary(all_results)
+    total_min = (time.time() - sweep_t0) / 60.0
+    print(f"\nTotal sweep time: {total_min:.1f} min")
+
+    with open(OUT_BASE / "summary.json", "w") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"summary.csv  → {OUT_BASE / 'summary.csv'}")
+    print(f"summary.json → {OUT_BASE / 'summary.json'}")
 
 
 if __name__ == "__main__":

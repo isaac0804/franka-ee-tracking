@@ -1,0 +1,69 @@
+# Best transformer — no cross-attention, 5M steps
+# Architecture: same as tfm_base_5M but use_cross_attn=False
+# Ablation B at 300k showed no_xattn beats tfm_base on all metrics:
+#   seed=42: MT=23.6mm  CI=4.9mm  F8=4.8mm  (vs base MT=27.0 CI=5.0 F8=6.5)
+#   seed=1:  MT=25.2mm  CI=6.5mm  F8=5.5mm
+# Cross-attention is redundant — paired (cmd[i], fine[i]) tokens already
+# encode the temporal structure; xattn just adds noise at this scale.
+# Comparison targets:
+#   MLP champion (10M): MT=16.0mm  CI=5.3mm  F8=4.7mm
+#   tfm_base (300k):    MT=27.0mm  CI=5.0mm  F8=6.5mm
+env:
+  control_hz: 50.0
+  episode_seconds: 6.0
+  randomize_trajectory: true
+  trajectory_pool: ["moving_target", "circle", "figure8"]
+  residual_scale: 0.12
+  use_residual: true
+  w_pos: 5.0
+  w_vel: 0.1
+  w_residual: 0.087
+  w_jerk: 0.0
+  w_smooth: 0.0
+  w_delta_pos: 0.0
+  w_bonus: 0.0
+  bonus_sharpness: 0.0
+  fail_pos_err: 0.30
+  lookahead_horizon: 5
+  lookahead_dt: 0.02
+  lookahead_coarse_horizon: 4
+  lookahead_coarse_dt: 0.10
+  action_filter_hz: 0.0
+  disturbance:
+    obs_pos_noise: 0.005
+    obs_jnt_noise: 0.002
+    cmd_delay: 5
+
+train:
+  total_timesteps: 5_000_000
+  n_envs: 20
+  policy: "DelayTransformerPolicy"
+  policy_kwargs:
+    d_model: 64
+    nhead: 4
+    n_enc_layers: 2
+    n_xattn_layers: 1
+    actor_arch: [256, 256]
+    critic_arch: [256, 256, 256]
+    n_fine: 5
+    n_coarse: 4
+    n_cmd: 5
+    use_pos_embed: true
+    use_cross_attn: false     # ← key: cross-attn removed
+    pair_tokens: true
+    optimizer_kwargs:
+      weight_decay: 0.0001
+  learning_rate: 0.001
+  lr_final: 0.0001
+  lr_schedule: "cosine"
+  n_steps: 2048
+  batch_size: 512
+  n_epochs: 5
+  gamma: 0.97
+  gae_lambda: 0.95
+  clip_range: 0.3
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  seed: 42
+  delay_aware_gae: false

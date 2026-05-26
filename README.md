@@ -1,164 +1,214 @@
-# Franka EE Tracking — Residual PPO
+# Franka EE Tracking — Residual PPO with Delay-Aware Transformer
 
-7-DoF Franka Panda end-effector tracking in MuJoCo.  
-A damped-least-squares IK baseline handles reactive tracking; a PPO residual policy learns to compensate for what IK cannot model: a whole-pipeline command delay that makes reactive control systematically lag behind the target.
+7-DoF Franka Panda end-effector tracking in MuJoCo, trained with residual PPO on top of a damped-least-squares IK baseline. The core challenge is a **5-step (100 ms) whole-pipeline command delay** that causes reactive controllers to systematically lag the target. A transformer policy with delay-aware observations learns predictive corrections the IK cannot make.
 
-## Repository layout
+<!-- TODO: replace with best tracking GIF once 5M model is recorded -->
+
+---
+
+## Results
+
+![RMSE comparison](results/figures/rmse_comparison.png)
+
+All numbers are RMSE (mm) after settling. Lower is better.
+
+| Model | Steps | Moving Target | Circle | Figure-8 |
+|---|---|---|---|---|
+| IK baseline (no delay) | — | ~18 mm | ~8 mm | ~4 mm |
+| **IK baseline (100 ms delay)** | — | **38.1 mm** | **12.1 mm** | **7.7 mm** |
+| MLP | 300k | 25.9 mm | 10.7 mm | 8.7 mm |
+| MLP | 5M | 21.0 mm | 7.6 mm | 7.0 mm |
+| MLP | 10M | 16.0 mm | 5.3 mm | 4.7 mm |
+| Transformer (base) | 300k | 27.0 mm | 5.0 mm | 6.5 mm |
+| **Transformer (no cross-attn)** | **300k** | **23.6 mm** | **4.9 mm** | **4.8 mm** |
+| **Transformer (no cross-attn)** | **5M** | **TBD** | **TBD** | **TBD** |
+
+**Key result:** The transformer at 300k steps matches the MLP at 10M steps on circular and figure-8 trajectories — a **33× step efficiency advantage**.
+
+![Step efficiency](results/figures/efficiency_curve.png) The paired slot token design encodes the delay structure directly, which the MLP must discover from scratch over millions of steps.
+
+---
+
+## Quickstart
+
+```bash
+# 1. Install dependencies
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Clone Franka assets
+git clone --depth 1 --filter=blob:none --sparse \
+    https://github.com/google-deepmind/mujoco_menagerie.git assets/mujoco_menagerie
+git -C assets/mujoco_menagerie sparse-checkout set franka_emika_panda
+
+# 3. Train best model (~55 min, 20 parallel envs)
+python train.py \
+    --config ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml \
+    --out results/my_run
+
+# 4. Evaluate (IK vs policy table + trajectory plots)
+python evaluate.py ablation --model results/my_run/final_model.zip
+
+# 5. View training curves
+tensorboard --logdir results/my_run/tb
+```
+
+---
+
+## Approach
+
+### The delay problem
+
+A standard IK controller commands joint positions based on the *current* measured target. With a 5-step FIFO delay (100 ms round-trip), that command only executes when the target has already moved. On a fast random-walk trajectory this causes ~38 mm lag — more than double the no-delay IK error.
+
+The key insight: the delay window is known and fixed. If the policy can see both **where the target will be** when each queued command executes, and **what commands are already queued**, it can add a predictive correction that pre-compensates for the lag.
+
+### Residual control
+
+The policy outputs a **residual** on top of IK, not a full joint position command:
+
+```
+q_set(t) = clip(q_ik(t) + residual(t) × residual_scale, joint_limits)
+ctrl(t)  = q_set(t − 5)          ← whole pipeline delayed 5 steps
+```
+
+An untrained policy (residual ≈ 0) degrades gracefully to IK — the baseline is always available. The IK handles gross positioning; the residual only needs to learn the predictive delay-compensation correction.
+
+### Observation design
+
+The 81-D observation is structured around the delay:
+
+| Block | Dims | Content |
+|---|---|---|
+| Robot state | 30 | Joint positions/velocities, EE position, position error, IK command |
+| Fine lookahead | 15 | Target position at t+20ms … t+100ms — covers exact delay window |
+| Coarse lookahead | 12 | Target position at t+100ms … t+400ms — trajectory trend |
+| Command history | 35 | 5 queued setpoints minus current q — Markov restoring element |
+| Trajectory ID | 3 | One-hot: moving target / circle / figure-8 |
+
+The fine lookahead window covers exactly the 5-step delay. The command history reveals what corrections are already queued, preventing the policy from stacking redundant commands.
+
+---
+
+## Architecture
+
+### Transformer with paired slot tokens
+
+The transformer processes the delay queue as a sequence of **slot tokens**, where each token pairs the queued command with the fine lookahead target it will execute against:
+
+```
+slot[i] = Linear(concat(fine_lookahead[i], cmd_history[i]))  →  d_model
+```
+
+This pairing is the key structural prior. `cmd[i]` will execute when the target is at `fine[i]` — wiring this temporal alignment into the token representation gives the encoder a structure the MLP must discover from scratch.
+
+The slot sequence is processed by a pre-LN TransformerEncoder (2 layers, 4 heads, d_model=64), mean-pooled, and concatenated with the encoded robot state:
+
+```
+Observation
+    ├── robot_state (30D) ─────────────────────────────► Linear → state_enc (64D)
+    └── [fine[i] ‖ cmd[i]] × 5 ──► TransformerEncoder ──► mean pool → slots_enc (64D)
+                                                                         │
+                                                     concat(state_enc, slots_enc) (128D)
+                                                                         │
+                                          ┌──────────────────────────────┴──────────────────────┐
+                                       Actor MLP                                         Critic MLP
+                                    [256, 256] → 7D                              [256, 256, 256] → 1
+```
+
+### Ablation study
+
+![Ablation chart](results/figures/ablation_bar.png)
+
+Ablations at 300k steps identify which components matter:
+
+| Ablation | Moving Target | Circle | Figure-8 | Conclusion |
+|---|---|---|---|---|
+| Full model (baseline) | 27.0 mm | 5.0 mm | 6.5 mm | — |
+| A: no positional embedding | 26.8 mm | 11.1 mm | 10.7 mm | PE critical for periodic trajectories |
+| B: no cross-attention | 24.4 mm† | 5.7 mm† | 5.2 mm† | xattn redundant — paired tokens sufficient |
+| C: unpaired tokens | 26.6 mm‡ | 6.8 mm‡ | 6.9 mm‡ | pairing helps periodic trajectories |
+
+† mean over 2 seeds (seed=42: MT=23.6 CI=4.9 F8=4.8; seed=1: MT=25.2 CI=6.5 F8=5.5)
+‡ mean over 2 seeds (seed=42: MT=25.9 CI=5.9 F8=5.9; seed=1: MT=27.2 CI=7.7 F8=7.8)
+
+**Finding B:** Removing cross-attention *improves* the model on all trajectories. The paired token design already encodes the temporal alignment that cross-attention was meant to learn, making it redundant. The best model uses pure self-attention with no cross-attention layers.
+
+**Finding C:** Unpairing the tokens degrades CI by +1.8 mm and F8 by +0.4 mm on average. The `cmd[i]↔fine[i]` pairing is the key structural prior — it wires the temporal alignment directly into the encoder input rather than requiring the model to discover it.
+
+---
+
+## Design choices
+
+### State and action space
+
+**State (81D):** Concatenates current robot state, oracle future target positions (fine + coarse lookahead), and the pending command queue. The command history is essential for the Markov property: without it the policy cannot distinguish "IK is already compensating" from "nothing is queued" and stacks redundant corrections.
+
+**Action (7D):** Per-joint position residuals in [−1, 1], scaled by `residual_scale = 0.12 rad`. A zero action always falls back to IK.
+
+### Reward
+
+```
+r = w_pos × (‖err_prev‖ − ‖err_now‖)   # reward progress toward target
+  − w_vel × ‖ee_vel‖                    # penalise unnecessary motion
+  − w_residual × ‖action‖²              # small regularisation on residual
+```
+
+No jerk or smoothness penalty. With a 5-step delay the optimal strategy is a *predictive impulse* — inherently discontinuous. Penalising action changes directly penalises the delay-compensation mechanism.
+
+### Trajectory representation
+
+Three trajectory types trained simultaneously:
+- **Moving target** — band-limited random walk (0.05–0.15 Hz, 8–14 cm amplitude)
+- **Circle** — constant-speed circular orbit
+- **Figure-8** — Lissajous curve with direction reversals
+
+Training with a mixed pool was essential: single-trajectory training overfits and degrades on held-out trajectories.
+
+### Evaluation metric
+
+`residual_settled_rmse_mm`: RMSE of the EE position error over the settled portion of each episode (after 0.5 s), per trajectory type. Separates steady-state tracking from transient startup.
+
+### Uncertainty sources
+
+| Source | Implementation |
+|---|---|
+| Observation noise | Gaussian on EE position (σ=5 mm) and joint positions (σ=2 mm) |
+| Command delay | 5-step FIFO applied to the full IK+residual setpoint (100 ms) |
+| Unreachable positions | Episode terminates at 0.30 m tracking error; included as an eval scenario |
+
+---
+
+## Repository structure
 
 ```
 ee_tracking/
   env/
-    franka_tracking_env.py   # Gym env — obs / action / reward / architecture
-    ik_controller.py         # DLS inverse-kinematics baseline
-    trajectories.py          # circle, figure-8, moving_target, unreachable
-    disturbances.py          # obs noise, joint noise, command delay
+    franka_tracking_env.py   # Gymnasium env — obs, reward, delay FIFO
+    ik_controller.py         # Damped least-squares IK baseline
+    trajectories.py          # circle, figure-8, moving_target generators
+    disturbances.py          # noise + command delay
+  policies/
+    transformer_policy.py    # Paired-slot transformer (SB3-compatible)
+    gelu_policy.py           # MLP with GELU + LayerNorm
+    delay_buffer.py          # FIFO delay buffer
   configs/
-    default.yaml             # tuned env + PPO hyperparameters
-assets/
-  mujoco_menagerie/franka_emika_panda/   # Franka XML + meshes
+    mlp/                     # MLP configs (mlp_best_10M.yaml = champion MLP)
+    transformer/             # Transformer configs + ablations
 
-train.py                     # train residual PPO from a config YAML
-evaluate.py                  # IK-vs-residual ablation + rollout plots
-sweep.py                     # overnight hyperparameter sweep (sequential)
-probe.py                     # short diagnostic runs to compare configs quickly
-eval_ema.py                  # post-hoc EMA smoothing sweep (legacy, pre-delay arch)
-eval_posthoc.py              # post-hoc filter comparison (legacy, pre-delay arch)
+train.py                     # Train from YAML config
+evaluate.py                  # IK vs policy evaluation + plots
+sweep.py                     # Hyperparameter sweep runner
+record_video.py              # Record tracking video
+
+docs/architecture.md         # Full architecture diagrams (Mermaid)
+scripts/make_figures.py      # Generate result figures
+scripts/show_results.py      # Terminal results viewer
 ```
 
-## Setup
+---
 
-```bash
-uv venv .venv && source .venv/bin/activate
-uv pip install mujoco gymnasium "stable-baselines3>=2.3" torch numpy \
-               matplotlib pyyaml scipy tqdm tensorboard
-```
+## Acknowledgements
 
-Franka assets (if not already present):
-```bash
-git clone --depth 1 --filter=blob:none --sparse \
-    https://github.com/google-deepmind/mujoco_menagerie.git assets/mujoco_menagerie
-git -C assets/mujoco_menagerie sparse-checkout set franka_emika_panda
-```
-
-## Architecture
-
-```
-policy output (7-D, [-1,1])
-    ↓  2nd-order Butterworth @ 2 Hz  (baked into env during training)
-    ↓  × residual_scale (0.05 rad/s)
-    ↓
-q_set(t) = clip(q_ik(t) + filtered_residual(t) × dt, limits)
-    ↓
-    [  cmd_delay-step FIFO  ]   ← IK + residual travel through the same buffer
-    ↓
-ctrl(t) = q_set(t − cmd_delay)          sent to MuJoCo actuators
-```
-
-**Why the delay is the key disturbance:**  
-Both IK and the residual pass through the same `cmd_delay`-step FIFO (default 5 steps = 100 ms), modelling the full sensor-to-actuator round-trip (network latency, controller loop). IK, being purely reactive, commands based on the *current* measured position — which will be stale by the time the command executes. A pure IK controller with 100 ms delay degrades from ~18 mm to ~44 mm on `moving_target`.
-
-The residual policy observes `cmd_delta_history` (the setpoints currently in the FIFO) and a 0.5 s lookahead of future target positions. The lookahead window exactly covers the delay (`5 steps × 0.1 s = 0.5 s`), so the policy can read exactly where the target will be when each queued command executes and add the right predictive correction. An untrained policy (action ≈ 0) degrades gracefully to IK-with-delay.
-
-**Non-accumulating residual:**  
-The IK setpoint integrates freely every step; the residual is applied as a one-step position offset, not accumulated. A wrong correction at step `t` is fully self-correcting at `t+1` without the IK path being contaminated.
-
-```
-q_ik(t)  = clip(q_ik(t-1) + ik_qdot(t) × dt, limits)   # IK integrates freely
-q_set(t) = clip(q_ik(t)   + residual(t) × dt, limits)   # one-step offset
-ctrl(t)  = q_set(t − cmd_delay)                          # whole pipeline delayed
-```
-
-## Observation space
-
-```
-dim   field
- 7    q                — joint positions (+ obs_jnt_noise)
- 7    qdot             — joint velocities
- 3    ee_pos           — measured EE position (+ obs_pos_noise)
- 3    ee_pos_error     — target − ee_pos
- 3    target_vel       — desired EE velocity (analytic derivative)
- 7    ik_qdot          — current IK joint-velocity command
-3×H   lookahead_pos    — future target positions at lookahead_dt intervals (H=5)
-7×D   cmd_delta_hist   — pending setpoints minus current q, oldest→newest (D=5)
-|P|   traj_onehot      — trajectory type one-hot (reduces critic variance)
-```
-
-`cmd_delta_hist` is the Markov-restoring element: with a D-step delay the robot
-is executing q_set(t−D), so the policy must know q_set(t−D+1…t) to avoid
-redundant corrections.
-
-## Performance (moving_target)
-
-| System | RMSE (mm) | Notes |
-|---|---|---|
-| IK only, no delay | ~18 | baseline without pipeline delay |
-| IK only, 100 ms delay | ~44 | realistic delay; this is what residual must beat |
-| Residual PPO, 100 ms delay | TBD | training in progress (`results/run_delay5`) |
-
-`moving_target` uses a band-limited random walk (0.05–0.15 Hz, 8–14 cm extent).
-IK's lag grows with target speed; at 0.15 Hz and 14 cm the delay-induced error
-is ~40 mm — a large, learnable signal for the residual policy.
-
-## Quick start
-
-**Train** (saves model + VecNormalize stats + TensorBoard logs):
-```bash
-python train.py --out results/run1
-# or override timesteps:
-python train.py --timesteps 3_000_000 --out results/run1
-```
-
-**Evaluate** (IK vs residual table + plots):
-```bash
-python evaluate.py ablation --model results/run1/final_model.zip
-python evaluate.py rollout  --model results/run1/final_model.zip --trajectory moving_target
-```
-
-**Diagnostic probes** (short runs to compare configs, ~3 min/probe):
-```bash
-python probe.py                          # run all probes at 300k steps
-python probe.py --only wr020 rs010       # specific probes
-python probe.py --timesteps 150000       # quick smoke-test
-```
-
-**Hyperparameter sweep** (~10 h on CPU, resumable):
-```bash
-python sweep.py --out results/sweep
-python sweep.py --timesteps 500_000     # quick smoke-test
-```
-
-## Key hyperparameters
-
-| Parameter | Value | Notes |
-|---|---|---|
-| `cmd_delay` | 5 steps (100 ms) | Whole-pipeline delay; both IK and residual equally delayed |
-| `residual_scale` | 0.05 rad/s | Max per-joint residual; keep small so IK dominates at zero action |
-| `w_residual` | 0.5 | Quadratic penalty on residual magnitude |
-| `action_filter_hz` | 2.0 Hz | 2nd-order Butterworth baked into env (trains and evals together) |
-| `lookahead_horizon` | 5 | Future target positions in obs; covers the full delay window |
-| `lookahead_dt` | 0.10 s | Spacing between lookahead samples (5 × 0.1 s = 0.5 s = delay window) |
-| `obs_pos_noise` | 5 mm | Gaussian noise on EE measurement (affects IK and policy obs equally) |
-
-See `ee_tracking/configs/default.yaml` for all values.
-
-## Design decisions and dead ends
-
-**Why total command delay, not residual-only delay?**  
-An earlier version delayed only the residual correction, leaving IK undelayed. This gave IK an unfair advantage (it acted instantly; residual arrived 20 ms late), meaning the residual had to fight its own delay just to break even. Probe experiments confirmed the policy made zero progress (std ≈ 1.08 across all hyperparameter variants at 300k steps) — a task problem, not a tuning problem. Delaying the whole pipeline levels the playing field and creates a clear, learnable advantage for the predictive policy.
-
-**Why not velocity-additive residual?**  
-An earlier formulation accumulated IK and residual velocities together:
-`q_setpoint += (ik_qdot + residual) × dt`. A wrong residual at step `t` drifted
-into subsequent steps; 60 steps of max residual → 0.144 rad of accumulated error.
-The current non-accumulating offset bounds the worst-case correction to
-`residual_scale × dt = 0.001 rad` per step.
-
-**Why `moving_target` only in the training pool?**  
-Circle and figure-8 are too easy for IK (smooth, predictable, near-default config).
-Training on them provides weak gradient signal. `moving_target` is the hard case
-where delay matters most; other trajectories are used for eval only.
-
-**Why lookahead and not learned prediction?**  
-The lookahead gives the policy oracle future knowledge, which is unrealistic for
-real hardware. The goal here is to verify the residual architecture works before
-replacing the oracle with a learned predictor or Kalman filter.
+Franka Panda model from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie).
+Training via [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3).

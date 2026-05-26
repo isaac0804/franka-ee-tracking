@@ -24,6 +24,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from ee_tracking.env.franka_tracking_env import EnvConfig, FrankaTrackingEnv
 from ee_tracking.env.disturbances import DisturbanceConfig
+from ee_tracking.policies.gelu_policy import POLICY_REGISTRY as _POLICY_REGISTRY
+import ee_tracking.policies.transformer_policy  # noqa: F401 — registers transformer classes for cloudpickle on PPO.load
 
 ALL_TRAJECTORIES = ["moving_target", "circle", "figure8", "unreachable"]
 
@@ -36,22 +38,28 @@ _DEFAULT_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.00
 # ---------------------------------------------------------------------------
 
 def _env_kwargs_from_cfg(saved_cfg: dict) -> dict:
-    """Extract ALL observation-space-affecting env params from a saved config dict.
+    """Extract ALL env params that must match training from a saved config dict.
 
-    These must match the training env exactly or VecNormalize will have the
-    wrong input dimension and model.predict() will crash.
+    Obs-space-affecting (mismatch → crash):
+      - trajectory_pool       → one-hot length
+      - lookahead_horizon     → 3 * horizon elements
+      - lookahead_coarse_horizon → 3 * horizon elements
+      - cmd_delay             → 7 * max(1, delay) cmd-delta-history elements
 
-    Affected obs dimensions:
-      - trajectory_pool  → one-hot length
-      - lookahead_horizon → 3 * horizon elements
-      - cmd_delay        → 7 * max(1, delay) cmd-delta-history elements
+    Behaviour-affecting (mismatch → catastrophic performance, no crash):
+      - residual_scale        → action multiplier; MUST match training or policy
+                                overshoots by (default/trained) ratio (e.g. 8×)
+      - lookahead_dt / lookahead_coarse_dt → which future steps are observed
     """
     env = saved_cfg.get("env", {})
     dist = env.get("disturbance", {})
     return dict(
         trajectory_pool=tuple(env.get("trajectory_pool", ["moving_target"])),
         lookahead_horizon=int(env.get("lookahead_horizon", 5)),
-        lookahead_dt=float(env.get("lookahead_dt", 0.10)),
+        lookahead_dt=float(env.get("lookahead_dt", 0.02)),
+        lookahead_coarse_horizon=int(env.get("lookahead_coarse_horizon", 4)),
+        lookahead_coarse_dt=float(env.get("lookahead_coarse_dt", 0.10)),
+        residual_scale=float(env.get("residual_scale", 0.05)),
         action_filter_hz=float(env.get("action_filter_hz", 0.0)),
         disturbance=DisturbanceConfig(
             obs_pos_noise=float(dist.get("obs_pos_noise", 0.005)),
@@ -123,7 +131,10 @@ def _eval_config(
     seed: int,
     trajectory_pool: tuple = ("moving_target",),
     lookahead_horizon: int = 5,
-    lookahead_dt: float = 0.10,
+    lookahead_dt: float = 0.02,
+    lookahead_coarse_horizon: int = 4,
+    lookahead_coarse_dt: float = 0.10,
+    residual_scale: float = 0.05,
     action_filter_hz: float = 0.0,
     disturbance: DisturbanceConfig | None = None,
 ) -> EnvConfig:
@@ -136,6 +147,9 @@ def _eval_config(
         seed=seed,
         lookahead_horizon=lookahead_horizon,
         lookahead_dt=lookahead_dt,
+        lookahead_coarse_horizon=lookahead_coarse_horizon,
+        lookahead_coarse_dt=lookahead_coarse_dt,
+        residual_scale=residual_scale,
         action_filter_hz=action_filter_hz,
     )
 
@@ -147,7 +161,10 @@ def run_residual(
     seed: int = 42,
     trajectory_pool: tuple = ("moving_target",),
     lookahead_horizon: int = 5,
-    lookahead_dt: float = 0.10,
+    lookahead_dt: float = 0.02,
+    lookahead_coarse_horizon: int = 4,
+    lookahead_coarse_dt: float = 0.10,
+    residual_scale: float = 0.05,
     action_filter_hz: float = 0.0,
     disturbance: DisturbanceConfig | None = None,
     action_ema_posthoc: float = 1.0,
@@ -169,6 +186,9 @@ def run_residual(
         trajectory_pool=trajectory_pool,
         lookahead_horizon=lookahead_horizon,
         lookahead_dt=lookahead_dt,
+        lookahead_coarse_horizon=lookahead_coarse_horizon,
+        lookahead_coarse_dt=lookahead_coarse_dt,
+        residual_scale=residual_scale,
         action_filter_hz=action_filter_hz,
         disturbance=disturbance,
     )

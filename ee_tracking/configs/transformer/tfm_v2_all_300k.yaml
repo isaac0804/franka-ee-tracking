@@ -1,0 +1,71 @@
+# v2-ALL: D+E+F+ffn4 — all v2 improvements combined.
+# mlp_proj + use_reactive + attn_pool + ffn_mult=4
+# 168k params, 192d latent. Full v2 architecture.
+# Baseline (tfm_base_300k): MT=27.0mm  CI=5.0mm  F8=6.5mm
+env:
+  control_hz: 50.0
+  episode_seconds: 6.0
+  randomize_trajectory: true
+  trajectory_pool: ["moving_target", "circle", "figure8"]
+  residual_scale: 0.12
+  use_residual: true
+  w_pos: 5.0
+  w_vel: 0.1
+  w_residual: 0.087
+  w_jerk: 0.0
+  w_smooth: 0.0
+  w_delta_pos: 0.0
+  w_bonus: 0.0
+  bonus_sharpness: 0.0
+  fail_pos_err: 0.30
+  lookahead_horizon: 5
+  lookahead_dt: 0.02
+  lookahead_coarse_horizon: 4
+  lookahead_coarse_dt: 0.10
+  action_filter_hz: 0.0
+  disturbance:
+    obs_pos_noise: 0.005
+    obs_jnt_noise: 0.002
+    cmd_delay: 5
+
+train:
+  total_timesteps: 300_000
+  n_envs: 20
+  policy: "DelayTransformerPolicy"
+  policy_kwargs:
+    d_model: 64
+
+train:
+  total_timesteps: 300_000
+  n_envs: 20
+  policy: "DelayTransformerPolicy"
+  policy_kwargs:
+    d_model: 64
+    nhead: 4
+    n_enc_layers: 2
+    n_xattn_layers: 1
+    actor_arch: [128, 128]
+    critic_arch: [128, 128, 128]
+    n_fine: 5
+    n_coarse: 4
+    n_cmd: 5
+    mlp_proj: true
+    use_reactive: true
+    attn_pool: true
+    ffn_mult: 4
+    optimizer_kwargs:
+      weight_decay: 0.0001
+  learning_rate: 0.001
+  lr_final: 0.0001
+  lr_schedule: "cosine"
+  n_steps: 2048
+  batch_size: 512
+  n_epochs: 5
+  gamma: 0.97
+  gae_lambda: 0.95
+  clip_range: 0.3
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  seed: 42
+  delay_aware_gae: false
