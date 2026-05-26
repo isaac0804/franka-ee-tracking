@@ -12,8 +12,6 @@ __pycache__/
 results/*
 !results/figures/
 !results/figures/**
-!results/eval/
-!results/eval/ablation.json
 
 # Assets cloned separately (see README setup instructions)
 assets/
