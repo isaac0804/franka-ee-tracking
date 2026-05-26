@@ -66,12 +66,39 @@ Transformer is **47% better on square, 37% on rectangle**. Hard corners are wher
 
 **OOD task conditions** — same geometry, different regime:
 
-| Trajectory | IK | MLP 5M (mean) | **Transformer 5M** |
+| Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M (seed=42)** |
 |---|---|---|---|
 | Fast circle (2× speed) | 31.1 mm | 11.1 mm | **9.6 mm** |
-| Step target (pick-and-place) | 84.5 mm | **59.3 mm** | 64.3 mm |
+| Step target (pick-and-place) | 61.2 ± 12.5 mm | 40.3 ± 10.7 mm | **41.6 ± 12.5 mm** |
 
-Fast circle: transformer edges out MLP (−13%). Step target: **MLP wins** — the discrete jump needs an aggressive impulse response, and the MLP's higher saturation rate (49% vs 37%) settles faster. The transformer's smoother, more deliberate corrections are a liability here. This is a genuine architectural tradeoff.
+Fast circle: transformer edges out MLP (−13%). Step target: **essentially tied** (41.6 vs 40.3 mm, σ≈11 mm — well within seed-to-seed noise). Step target is a stochastic trajectory (random waypoint sequences); single-seed comparisons are unreliable at this variance level. Both models improve substantially over IK (32–36%).
+
+---
+
+## Design Note
+
+### State and action
+The 95-D observation is structured around the delay. The key blocks are the **fine lookahead** (target positions at t+20ms … t+100ms, covering the exact 5-step delay window) and the **command history** (the 5 setpoints already queued in the FIFO). The command history is essential for the Markov property — without it the policy cannot tell whether IK is already compensating and stacks redundant corrections.
+
+Actions are 7-D per-joint residuals in [−1, 1], scaled by `residual_scale = 0.12 rad` and added to the IK setpoint. A zero action always falls back to IK, so an untrained policy degrades gracefully.
+
+### Reward
+```
+r = w_pos × (‖err_prev‖ − ‖err_now‖)   # reward progress, not absolute error
+  − w_vel × ‖ee_vel‖                    # penalise unnecessary motion
+  − w_residual × ‖action‖²              # small L2 regularisation on residual
+```
+No jerk or smoothness penalty. With a fixed 100 ms delay, the optimal strategy is a *predictive impulse* — inherently discontinuous. Penalising action changes would directly penalise the delay-compensation mechanism.
+
+### Trajectory representation
+Three types trained simultaneously in a mixed pool: **moving target** (band-limited random walk), **circle** (constant-speed orbit), **figure-8** (Lissajous curve). Single-trajectory training overfits — mixed training was the largest single improvement in the MLP phase and stabilises the critic across all architectures.
+
+Each trajectory provides oracle future positions as a lookahead. Orientation is not tracked (position only).
+
+### How tracking performance is evaluated
+`residual_settled_rmse_mm` — RMSE of the 3-D EE position error over the *settled* portion of each episode (after 0.5 s warmup), averaged per trajectory type. Settled RMSE separates steady-state tracking from transient startup and is the primary reported metric throughout.
+
+For stochastic trajectories (moving target, step target) results are averaged over 10 random seeds with ± std reported. Smoothness is quantified via **action roughness** (mean |a_t − a_{t−1}| per joint) and **saturation rate** (fraction of timesteps with |action| > 0.9) — both hardware-relevant proxies for motor stress.
 
 ---
 
@@ -86,16 +113,25 @@ pip install -r requirements.txt
 git clone --depth 1 --filter=blob:none --sparse \
     https://github.com/google-deepmind/mujoco_menagerie.git assets/mujoco_menagerie
 git -C assets/mujoco_menagerie sparse-checkout set franka_emika_panda
+```
 
-# 3. Train best model (~55 min, 20 parallel envs)
+**Option A — run with pre-trained weights (no training required):**
+```bash
+# Evaluate transformer vs IK baseline, all trajectory types
+python evaluate.py ablation --model results/canonical/transformer_5M.zip
+
+# Record a tracking video
+python record_video.py --model results/canonical/transformer_5M.zip --trajectory circle
+```
+
+**Option B — train from scratch (~55 min, 20 parallel envs):**
+```bash
 python train.py \
     --config ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml \
     --out results/my_run
 
-# 4. Evaluate (IK vs policy table + trajectory plots)
 python evaluate.py ablation --model results/my_run/final_model.zip
 
-# 5. View training curves
 tensorboard --logdir results/my_run/tb
 ```
 

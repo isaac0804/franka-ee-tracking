@@ -216,13 +216,13 @@ Transformer is **47% better on square, 37% on rectangle**. Hard corners are wher
 | Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
 |---|---|---|---|
 | Fast circle (2× training speed) | 31.1 mm | 11.1 mm | **9.6 mm** |
-| Step target (random waypoint jumps) | 84.5 mm | **59.3 mm** | 64.3 mm |
+| Step target (random waypoints, 10 seeds) | 61.2 ± 12.5 mm | 40.3 ± 10.7 mm | **41.6 ± 12.5 mm** |
 
 Fast circle (period 2–4s vs training 4–8s): transformer wins by 13%. The delay compensation generalises to higher speeds.
 
-**Step target reveals a genuine tradeoff:** the transformer is beaten by the MLP on discrete position jumps. A step jump requires an aggressive impulse response: command hard toward the new position immediately and correct fast. The MLP's higher action saturation rate (49% vs 37%) and roughness (0.47 vs 0.29) actually helps here — the more bang-bang policy settles to the new waypoint faster. The transformer's structural prior is tuned for smooth trajectories where deliberate pre-compensation pays off, not for step-response dynamics.
+**Step target: both models are essentially tied.** StepTarget is stochastic — each seed generates a different random waypoint sequence — so the relevant metric is the mean ± std over multiple seeds, not a single roll. At σ≈11 mm the 41.6 vs 40.3 mm difference is well within noise. Both reduce the IK error by ~32–36%; neither architecture has a structural advantage here.
 
-This is not a failure — it is a genuine architectural tradeoff documented honestly. A combined system could route step targets through a different controller (pure IK is already 84mm; an impulsive MLP gets this to 59mm; the transformer's penalty is 5mm over the MLP).
+Structurally, the transformer should be capable of handling step targets: `fine[4]` shows the upcoming waypoint exactly 100ms before the step executes, giving the policy exactly one delay window of pre-compensation. Whether the policy uses this for aggressive pre-steering vs. smooth ramp-up does not produce a measurable RMSE difference at this scale.
 
 ---
 

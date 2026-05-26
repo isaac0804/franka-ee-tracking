@@ -281,7 +281,7 @@ def _strip_arrays(d: dict) -> dict:
 
 
 # Trajectories that vary with seed — need multi-run averaging
-_STOCHASTIC_TRAJECTORIES = {"moving_target", "moving", "unreachable"}
+_STOCHASTIC_TRAJECTORIES = {"moving_target", "moving", "unreachable", "step_target", "step"}
 
 
 def run_multi(run_fn, trajectory: str, n_seeds: int = 10, base_seed: int = 0, **kwargs) -> dict:

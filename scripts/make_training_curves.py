@@ -102,6 +102,7 @@ def main():
         label = LABELS[arch]
 
         all_steps, all_vals = [], []
+        run_labels = []
         for run_dir in run_dirs:
             steps, vals = load_curve(run_dir)
             if steps is None:
@@ -111,25 +112,47 @@ def main():
                 vals = smooth(vals, window=7)
             all_steps.append(steps)
             all_vals.append(vals)
-            # faint individual seed line
-            ax.plot(steps / 1e6, vals, color=color, lw=0.8, alpha=0.35)
+            run_labels.append(run_dir)
 
-        if len(all_steps) < 2:
-            # Only one seed: just plot it solidly
-            if all_steps:
-                ax.plot(all_steps[0] / 1e6, all_vals[0],
-                        color=color, lw=2.0, label=label)
+        if not all_steps:
             continue
 
-        # Shaded band over common x-grid
-        x_grid, mat = interpolate_to_common(all_steps, all_vals)
-        mean_curve = mat.mean(axis=0)
-        lo = mat.min(axis=0)
-        hi = mat.max(axis=0)
+        if len(all_steps) == 1:
+            # Only one seed: plot solidly
+            ax.plot(all_steps[0] / 1e6, all_vals[0],
+                    color=color, lw=2.0, label=label)
+            continue
 
-        ax.fill_between(x_grid / 1e6, lo, hi, color=color, alpha=0.15)
-        ax.plot(x_grid / 1e6, mean_curve, color=color, lw=2.2,
-                label=f"{label} (mean, 2 seeds)")
+        # Check if curves have very different lengths (partial run)
+        max_steps = [s[-1] for s in all_steps]
+        complete_threshold = 0.85  # seed is "complete" if ≥85% of max steps
+        global_max = max(max_steps)
+        complete = [s >= global_max * complete_threshold for s in max_steps]
+
+        if all(complete):
+            # All seeds complete → shaded band
+            x_grid, mat = interpolate_to_common(all_steps, all_vals)
+            mean_curve = mat.mean(axis=0)
+            lo = mat.min(axis=0)
+            hi = mat.max(axis=0)
+            ax.fill_between(x_grid / 1e6, lo, hi, color=color, alpha=0.15)
+            ax.plot(x_grid / 1e6, mean_curve, color=color, lw=2.2,
+                    label=f"{label} (mean, 2 seeds)")
+        else:
+            # Mixed: plot completed seed solid, partial seed dashed (in-progress)
+            first_legend = True
+            for i, (steps, vals) in enumerate(zip(all_steps, all_vals)):
+                is_complete = complete[i]
+                pct = int(steps[-1] / global_max * 100)
+                if is_complete:
+                    lbl = f"{label} (seed {i+1})" if first_legend else None
+                    ax.plot(steps / 1e6, vals, color=color, lw=2.2,
+                            label=lbl)
+                    first_legend = False
+                else:
+                    lbl = f"{label} (seed {i+1}, {pct}% done — in progress)"
+                    ax.plot(steps / 1e6, vals, color=color, lw=1.6, ls="--",
+                            alpha=0.75, label=lbl)
 
     # IK reference lines
     ax.axhline(IK_DELAY_MM, color=COLORS["ik_delay"], lw=1.2, ls="--",

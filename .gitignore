@@ -12,6 +12,8 @@ __pycache__/
 results/*
 !results/figures/
 !results/figures/**
+!results/canonical/
+!results/canonical/**
 
 # Assets cloned separately (see README setup instructions)
 assets/

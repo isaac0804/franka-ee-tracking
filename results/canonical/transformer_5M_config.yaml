@@ -1,0 +1,67 @@
+env:
+  action_filter_hz: 0.0
+  bonus_sharpness: 0.0
+  control_hz: 50.0
+  disturbance:
+    cmd_delay: 5
+    obs_jnt_noise: 0.002
+    obs_pos_noise: 0.005
+  episode_seconds: 6.0
+  fail_pos_err: 0.3
+  lookahead_coarse_dt: 0.1
+  lookahead_coarse_horizon: 4
+  lookahead_dt: 0.02
+  lookahead_horizon: 5
+  randomize_trajectory: true
+  residual_scale: 0.12
+  seed: 42
+  trajectory_pool:
+  - moving_target
+  - circle
+  - figure8
+  use_residual: true
+  w_bonus: 0.0
+  w_delta_pos: 0.0
+  w_jerk: 0.0
+  w_pos: 5.0
+  w_residual: 0.087
+  w_smooth: 0.0
+  w_vel: 0.1
+train:
+  batch_size: 512
+  clip_range: 0.3
+  delay_aware_gae: false
+  ent_coef: 0.01
+  gae_lambda: 0.95
+  gamma: 0.97
+  learning_rate: 0.001
+  lr_final: 0.0001
+  lr_schedule: cosine
+  max_grad_norm: 0.5
+  n_envs: 20
+  n_epochs: 5
+  n_steps: 2048
+  policy: DelayTransformerPolicy
+  policy_kwargs:
+    actor_arch:
+    - 256
+    - 256
+    critic_arch:
+    - 256
+    - 256
+    - 256
+    d_model: 64
+    n_cmd: 5
+    n_coarse: 4
+    n_enc_layers: 2
+    n_fine: 5
+    n_xattn_layers: 1
+    nhead: 4
+    optimizer_kwargs:
+      weight_decay: 0.0001
+    pair_tokens: true
+    use_cross_attn: false
+    use_pos_embed: true
+  seed: 42
+  total_timesteps: 5000000
+  vf_coef: 0.5
