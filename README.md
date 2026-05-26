@@ -104,19 +104,7 @@ This pairing is the key structural prior. `cmd[i]` will execute when the target 
 
 The slot sequence is processed by a pre-LN TransformerEncoder (2 layers, 4 heads, d_model=64), mean-pooled, and concatenated with the encoded robot state:
 
-```
-Observation
-    ├── robot_state (30D) ─┐
-    ├── coarse_look (12D)  ├─ concat (45D) ──► Linear → state_enc (64D)
-    ├── traj_onehot  (3D) ─┘
-    └── [fine[i] ‖ cmd[i]] × 5 ──► TransformerEncoder ──► mean pool → slots_enc (64D)
-                                                                         │
-                                                     concat(state_enc, slots_enc) (128D)
-                                                                         │
-                                          ┌──────────────────────────────┴──────────────────────┐
-                                       Actor MLP                                         Critic MLP
-                                    [256, 256] → 7D                              [256, 256, 256] → 1
-```
+![Architecture diagram](results/figures/architecture.png)
 
 ### Ablation study
 
