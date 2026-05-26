@@ -21,9 +21,9 @@ All numbers are RMSE (mm) after settling. Lower is better.
 | MLP | 10M | 16.0 mm | 5.3 mm | 4.7 mm |
 | Transformer (base) | 300k | 27.0 mm | 5.0 mm | 6.5 mm |
 | **Transformer (no cross-attn)** | **300k** | **23.6 mm** | **4.9 mm** | **4.8 mm** |
-| **Transformer (no cross-attn)** | **5M** | **TBD** | **TBD** | **TBD** |
+| **Transformer (no cross-attn)** | **5M** | **19.7 mm** | **5.3 mm** | **6.0 mm** |
 
-**Key result:** The transformer at 300k steps matches the MLP at 10M steps on circular and figure-8 trajectories — a **33× step efficiency advantage**.
+**Key result:** The transformer at 300k steps matches the MLP at 10M steps on circular and figure-8 trajectories — a **33× step efficiency advantage**. At 5M steps the transformer matches the MLP champion on circle (5.3 mm) and closes within 4 mm on the random-walk trajectory (19.7 vs 16.0 mm).
 
 ![Step efficiency](results/figures/efficiency_curve.png) The paired slot token design encodes the delay structure directly, which the MLP must discover from scratch over millions of steps.
 

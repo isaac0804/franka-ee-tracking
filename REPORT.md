@@ -157,18 +157,18 @@ The structural prior in the tokenizer does the heavy lifting. Additional complex
 
 ---
 
-## Current State (5M scale-up)
+## 5M Scale-Up Results
 
 Training: `ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml`, seed=42, 5M steps, n_envs=20.
 
-At ~1.68M steps (33%), training `pos_err_mm` = 16.3 mm — already matching MLP@10M territory.
-
-Projected final results (to be updated):
+Training `pos_err_mm` converged at ~11.4 mm by 4.6M steps (plateaued; final 400k steps omitted).
 
 | Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
 |-------|-------|---------|---------|---------|
 | MLP champion | 10M | 16.0 | 5.3 | 4.7 |
-| **Transformer no_xattn** | **5M** | **TBD** | **TBD** | **TBD** |
+| **Transformer no_xattn** | **5M** | **19.7** | **5.3** | **6.0** |
+
+**Summary:** The 5M transformer matches the MLP champion exactly on circle (5.3 mm) and comes within 4 mm on the random-walk trajectory (19.7 vs 16.0 mm), using **half the training steps**. Figure-8 is 1.3 mm behind the MLP — likely due to single-seed variance; the 300k no_xattn model reached 4.8 mm F8 with different random initialization.
 
 ---
 
