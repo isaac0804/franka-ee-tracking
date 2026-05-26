@@ -122,19 +122,16 @@ Observation
 
 ![Ablation chart](results/figures/ablation_bar.png)
 
-Ablations at 300k steps, each removing or adding one component from the canonical architecture (self-attention only, paired tokens, positional embedding):
+Core architecture ablation at 300k steps — each variant removes or replaces one component from the canonical (self-attention only, paired tokens, positional embedding):
 
 | Ablation | Moving Target | Circle | Figure-8 | Conclusion |
 |---|---|---|---|---|
-| **Canonical (self-attn, no xattn)** | **24.4 mm†** | **5.7 mm†** | **5.2 mm†** | **— baseline** |
-| A: + cross-attention layers | 27.0 mm | 5.0 mm | 6.5 mm | xattn adds no benefit — regresses MT and F8 |
-| B: − positional embedding | 26.8 mm | 11.1 mm | 10.7 mm | PE critical for periodic trajectories |
-| C: unpaired tokens | 26.6 mm‡ | 6.8 mm‡ | 6.9 mm‡ | pairing helps periodic trajectories |
+| **Canonical (self-attn, no xattn)** | **24.4 mm** | **5.7 mm** | **5.2 mm** | — baseline |
+| A: − positional embedding | 26.8 mm | 11.1 mm | 10.7 mm | PE critical for periodic trajectories |
+| B: + cross-attention layers | 27.0 mm | 5.0 mm | 6.5 mm | xattn hurts MT and F8 |
+| C: unpaired tokens | 26.6 mm | 6.8 mm | 6.9 mm | pairing helps all trajectories |
 
-† mean over 2 seeds (seed=42: MT=23.6 CI=4.9 F8=4.8; seed=1: MT=25.2 CI=6.5 F8=5.5)
-‡ mean over 2 seeds (seed=42: MT=25.9 CI=5.9 F8=5.9; seed=1: MT=27.2 CI=7.7 F8=7.8)
-
-Positional embedding is critical for periodic trajectories — without it slot[0] and slot[4] are indistinguishable (+5–6 mm on circle/figure-8). Cross-attention *hurts*: the `cmd[i]↔fine[i]` pairing already encodes the temporal alignment it was meant to learn, making extra attention heads redundant.
+See [**full ablation study and architecture explorations**](docs/ablations.md) for per-seed detail, v2 architecture variants (MLP projection, reactive bypass, attention pooling), hyperparameter sensitivity (residual scale, LR schedule, PPO settings), and action filter experiments.
 
 ---
 
@@ -161,6 +158,7 @@ sweep.py                     # Hyperparameter sweep runner
 record_video.py              # Record tracking video
 
 docs/architecture.md         # Full architecture diagrams (Mermaid)
+docs/ablations.md            # Full ablation study & experiment log
 scripts/make_figures.py      # Generate result figures
 scripts/show_results.py      # Terminal results viewer
 ```
