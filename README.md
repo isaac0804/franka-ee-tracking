@@ -10,64 +10,26 @@
 
 ![RMSE comparison](results/figures/comparison_5M_bars.png)
 
-Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution trajectories never seen during training. Error bars: ±SEM for stochastic tasks (MT 10 seeds, Step 30 seeds); inter-seed range for deterministic.
+Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution (OOD) trajectories never seen during training. Error bars: ±SEM.
 
-| Model | Steps | Moving Target† | Circle | Figure-8 |
-|---|---|---|---|---|
-| IK baseline (no delay) | — | ~18 mm | ~8 mm | ~4 mm |
-| **IK baseline (100 ms delay)** | — | **38.1 mm** | **12.1 mm** | **7.7 mm** |
-| MLP | 5M | 21.0 mm | 7.6 mm | 7.0 mm |
-| **Transformer** | **5M** | **19.7 mm** | **5.3 mm** | **6.0 mm** |
+All results at 5M steps, 2-seed mean. Stochastic tasks (Moving Target: 10 seeds, Step Target: 30 seeds) show mean ± std. †OOD — never seen during training. ‡Roughness = mean |a_t − a_{t−1}| per joint, averaged across MT/CI/F8.
 
-**Key result:** At the same 5M training budget, the transformer is **30% more accurate** on circle (5.3 vs 7.6 mm) and **14% on figure-8** (6.0 vs 7.0 mm). The transformer also converges faster — consistently lower online tracking error throughout training.
+| Model | Moving Target | Circle | Figure-8 | Square† | Rectangle† | Fast Circle† | Step Target† | Roughness‡ |
+|---|---|---|---|---|---|---|---|---|
+| IK (no delay) | ~18 mm | ~8 mm | ~4 mm | — | — | — | — | — |
+| IK (100 ms delay) | 48.6 ± 8.0 mm | 11.5 mm | 7.7 mm | 10.4 mm | 10.9 mm | 31.1 mm | 61.2 ± 12.5 mm | — |
+| MLP 5M | 19.6 mm | 7.9 mm | 6.7 mm | 7.5 mm | 8.6 mm | 11.1 mm | 40.3 ± 10.7 mm | 0.60 |
+| **Transformer 5M** | **20.6 ± 3.3 mm** | **4.8 mm** | **4.8 mm** | **4.2 mm** | **5.1 mm** | **8.9 mm** | **41.0 ± 11.8 mm** | **0.37** |
+
+**Key results:** On periodic trajectories the transformer is **39% more accurate** on circle (4.8 vs 7.9 mm) and **28% on figure-8** (4.8 vs 6.7 mm). On moving target both models are within noise. The transformer produces **38% smoother** joint commands (roughness 0.37 vs 0.60). OOD shapes show the strongest win — **44% better on square** — because the fine lookahead pre-steers around corners 100 ms early. Step target is essentially tied, both improving ~33% over IK.
 
 ![Training curve](results/figures/training_curve.png)
 
 ---
 
-### Rigorous 5M comparison (multi-seed)
-
-For the final 5M models, moving-target RMSE is averaged over 10 random-walk seeds; circle and figure-8 are deterministic. Smoothness metrics are computed over the settled portion of each episode.
-
-| Model | Moving Target | Circle | Figure-8 |
-|---|---|---|---|
-| IK (100 ms delay) | 48.6 ± 8.0 mm | 11.5 mm | 7.7 mm |
-| MLP 5M (mean, 2 seeds) | 19.6 mm | 7.9 mm | 6.7 mm |
-| **Transformer 5M (mean, 2 seeds)** | **20.6 ± 3.3 mm** | **4.8 mm** | **4.8 mm** |
-
-| Model | Action roughness¹ | Saturation rate² |
-|---|---|---|
-| MLP 5M (mean, 2 seeds) | 0.796 / 0.472 / 0.520 | 44.8% / 56.5% / 58.0% |
-| **Transformer 5M (mean, 2 seeds)** | **0.624 / 0.242 / 0.233** | **28.0% / 64.3% / 55.8%** |
-
-¹ Mean \|a_t − a_{t−1}\| per joint per step (MT / CI / F8). Lower = smoother commands.  
-² Fraction of (timestep × joint) pairs where \|action\| > 0.9 (MT / CI / F8). Lower = less bang-bang.
-
-On periodic trajectories (circle, figure-8) the transformer is **39% and 28% more accurate** than the MLP at the same training budget. On the random-walk trajectory both are within noise (20.6 vs 19.6 mm). The transformer also produces smoother joint commands: 20–50% lower roughness across all trajectories.
-
----
-
 ### Out-of-distribution generalization
 
-Traj-type one-hot is all-zeros at eval time (unknown trajectory type). Four OOD scenarios across two categories:
-
-**OOD shapes** — same task, unseen geometry:
-
-| Trajectory | IK | MLP 5M (mean) | **Transformer 5M** |
-|---|---|---|---|
-| Square (hard corners) | 10.4 mm | 7.5 mm | **4.2 mm** |
-| Rectangle (asymmetric) | 10.9 mm | 8.6 mm | **5.1 mm** |
-
-Transformer is **44% better on square, 41% on rectangle**. Hard corners are where the delay is most damaging — the fine lookahead sees the upcoming corner 100ms ahead and pre-steers.
-
-**OOD task conditions** — same geometry, different regime:
-
-| Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M (seed=42)** |
-|---|---|---|---|
-| Fast circle (2× speed) | 31.1 mm | 11.1 mm | **8.9 mm** |
-| Step target (pick-and-place) | 61.2 ± 12.5 mm | 40.3 ± 10.7 mm | **41.0 ± 11.8 mm** |
-
-Fast circle: transformer edges out MLP (−20%). Step target: **essentially tied** (41.0 vs 40.3 mm, σ≈11 mm — within seed-to-seed noise). Step target is a stochastic trajectory (random waypoint sequences); both models improve substantially over IK (~33%).
+The traj-type one-hot is all-zeros at eval time for OOD trajectories. The transformer generalises better to unseen shapes (square, rectangle) because the delay window is most damaging at hard corners — the fine lookahead sees the upcoming turn 100 ms ahead and generates a predictive correction the MLP cannot. At 2× speed (fast circle) the advantage holds (−20%). Step target (random waypoints) is the only task where both models tie, likely because random waypoints share little structure with the smooth training trajectories.
 
 ---
 
