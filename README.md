@@ -10,7 +10,7 @@
 
 ![RMSE comparison](results/figures/comparison_5M_bars.png)
 
-Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution trajectories never seen during training. Error bars: ±std for stochastic tasks (MT 10 seeds, Step 5 seeds); inter-seed range for deterministic. †=1 seed.
+Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution trajectories never seen during training. Error bars: ±SEM for stochastic tasks (MT 10 seeds, Step 30 seeds); inter-seed range for deterministic. †=1 seed.
 
 | Model | Steps | Moving Target† | Circle | Figure-8 |
 |---|---|---|---|---|

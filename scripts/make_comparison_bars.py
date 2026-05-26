@@ -29,10 +29,10 @@ MODELS = {
             "results/sweep/rs012_5M/eval_ood",
             "results/sweep/rs012_seed1_5M/eval_ood",
         ],
-        # step_target + fast_circle (5-seed mean)
+        # step_target (30-seed, fast_circle falls back to 10-seed for deterministic)
         "ood2_eval_dirs": [
-            "results/sweep/rs012_5M/eval_ood2",
-            "results/sweep/rs012_seed1_5M/eval_ood2",
+            "results/sweep/rs012_5M/eval_ood2_30s",
+            "results/sweep/rs012_seed1_5M/eval_ood2_30s",
         ],
     },
     "transformer": {
@@ -40,15 +40,15 @@ MODELS = {
         "color": "#e05252",
         "indist_eval_dirs": [
             "results/eval/tfm_5M_s42_multi",
-            "results/eval/tfm_5M_s1_multi",   # populated after s1 training completes
+            "results/eval/tfm_5M_s1_multi",
         ],
         "ood_eval_dirs": [
             "results/main_runs/tfm_no_xattn_5M_s42/eval_ood",
-            "results/main_runs/tfm_no_xattn_5M_s1/eval_ood",  # after s1 completes
+            "results/main_runs/tfm_no_xattn_5M_s1/eval_ood",
         ],
         "ood2_eval_dirs": [
-            "results/main_runs/tfm_no_xattn_5M_s42/eval_ood2",
-            "results/main_runs/tfm_no_xattn_5M_s1/eval_ood2",  # after s1 completes
+            "results/main_runs/tfm_no_xattn_5M_s42/eval_ood2_30s",
+            "results/main_runs/tfm_no_xattn_5M_s1/eval_ood2_30s",
         ],
     },
 }
@@ -71,9 +71,11 @@ IK_MM = {
     "step_target":   84.5,   # 5-seed mean
     "fast_circle":   31.1,   # 5-seed mean (deterministic each seed)
 }
-IK_STD = {
-    "moving_target": 8.0,
-    "step_target":   0.0,    # approx — not stored separately but close to 0
+# IK error bars as SEM (std / sqrt(n)) — same n as the model evals
+# moving_target: std=8.0, n=10 → SEM≈2.5; step_target: std=13.5, n=30 → SEM≈2.5
+IK_SEM = {
+    "moving_target": round(8.0  / (10 ** 0.5), 2),   # ≈ 2.53
+    "step_target":   round(13.5 / (30 ** 0.5), 2),   # ≈ 2.47
 }
 
 
@@ -85,11 +87,17 @@ def load_eval(eval_dir: str) -> dict | None:
 
 
 def get_rmse(data: dict, traj: str) -> tuple[float | None, float | None]:
-    """Return (mean, std_or_None) from an ablation.json entry."""
+    """Return (mean, sem_or_None) from an ablation.json entry.
+
+    Uses SEM = std / sqrt(n) so error bars show uncertainty in the mean,
+    not the spread of individual episodes.
+    """
     t = data.get(traj, {})
     mean = t.get("residual_settled_rmse_mm")
     std  = t.get("residual_settled_rmse_mm_std")
-    return mean, std
+    n    = t.get("residual_settled_rmse_mm_n")
+    sem  = (std / np.sqrt(n)) if (std is not None and n and n > 1) else None
+    return mean, sem
 
 
 OOD_SHAPE_TRAJS = ["square", "rectangle"]
@@ -178,13 +186,13 @@ def main():
     # IK bars
     for i, traj in enumerate(ALL_TRAJS):
         ik_val = IK_MM[traj]
-        ik_std = IK_STD.get(traj)
+        ik_sem = IK_SEM.get(traj)
         xi = x_base[i] + offsets[0]
-        yerr = [[ik_std], [ik_std]] if ik_std else None
+        yerr = [[ik_sem], [ik_sem]] if ik_sem else None
         ax.bar(xi, ik_val, width=bar_w, color=ik_color, edgecolor="white",
                lw=0.8, zorder=3, yerr=yerr,
                error_kw=dict(ecolor="#888888", lw=1.0, capsize=2.5, capthick=1.0))
-        top = ik_val + (ik_std if ik_std else 0)
+        top = ik_val + (ik_sem if ik_sem else 0)
         ax.text(xi, top + 0.4, f"{ik_val:.0f}",
                 ha="center", va="bottom", fontsize=6.5, color="#666666")
     legend_patches.append(mpatches.Patch(color=ik_color, label="IK (100ms delay)"))
@@ -244,7 +252,7 @@ def main():
     ax.set_ylabel("Settled RMSE (mm) — lower is better", fontsize=11)
     ax.set_title(
         "MLP vs Transformer — 5M steps  |  in-distribution · OOD shapes · OOD task conditions\n"
-        "Error bars: ±std for stochastic (MT 10 seeds, step 5 seeds); inter-seed range for deterministic. *=1 seed.",
+        "Error bars: ±SEM for stochastic (MT 10 seeds, step 30 seeds); inter-seed range for deterministic. *=1 seed.",
         fontsize=10, pad=10)
     ax.legend(handles=legend_patches, fontsize=9, framealpha=0.92, loc="upper left")
     ax.grid(axis="y", color="#e0e0e0", lw=0.8, zorder=0)
