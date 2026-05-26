@@ -12,7 +12,7 @@
 
 Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution (OOD) trajectories never seen during training. Error bars: ±SEM.
 
-All results at 5M steps, 2-seed mean. Stochastic tasks (Moving Target: 10 seeds, Step Target: 30 seeds) show mean ± std. †OOD — never seen during training. ‡Roughness = mean $|a_t - a_{t-1}|$ per joint, averaged across MT/CI/F8.
+All results at 5M steps, 2-seed mean. Stochastic tasks (Moving Target: 10 seeds, Step Target: 30 seeds) show mean ± std. †OOD — never seen during training. ‡Roughness = mean $\lvert a_t - a_{t-1}\rvert$ per joint, averaged across MT/CI/F8.
 
 | Model | Moving Target | Circle | Figure-8 | Square† | Rectangle† | Fast Circle† | Step Target† | Roughness‡ |
 |---|---|---|---|---|---|---|---|---|
@@ -72,7 +72,7 @@ tensorboard --logdir results/my_run/tb
 
 A standard IK controller reacts to the *current* target. With a 5-step (100 ms) FIFO delay the command only executes when the target has already moved — causing ~49 mm lag on a random walk, 2.5× the no-delay error. The fix: if the policy sees **where the target will be** when each queued command executes, and **what commands are already queued**, it can add a predictive residual that pre-compensates.
 
-$$q_{\text{set}}(t) = \mathrm{clip}\!\left(q_{\text{ik}}(t) + r(t)\cdot s_r,\; q_{\text{lim}}\right)$$
+$$q_{\text{set}}(t) = \mathrm{clip}\left(q_{\text{ik}}(t) + r(t) \cdot s_r,\, q_{\text{lim}}\right)$$
 
 $$\text{ctrl}(t) = q_{\text{set}}(t - 5) \qquad \text{(whole pipeline delayed 5 steps)}$$
 
@@ -98,7 +98,7 @@ No smoothness penalty — the optimal delay-compensation strategy is a predictiv
 
 The transformer processes the delay queue as a sequence of **slot tokens**, where each token pairs the queued command with the fine lookahead target it will execute against:
 
-$$\text{slot}_i = W\!\left[\text{fine}_i \;\|\; \text{cmd}_i\right] \in \mathbb{R}^{d_{\text{model}}}$$
+$$\text{slot}_i = W\left[\text{fine}_i \,\Vert\, \text{cmd}_i\right] \in \mathbb{R}^{d_{\text{model}}}$$
 
 This pairing is the key structural prior. `cmd[i]` will execute when the target is at `fine[i]` — wiring this temporal alignment into the token representation gives the encoder a structure the MLP must discover from scratch.
 
