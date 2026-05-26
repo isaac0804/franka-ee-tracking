@@ -45,7 +45,7 @@ KNOWN: dict[str, tuple] = {
     "tfm_noxattn_300k":  (24.4,  5.7, 5.2),   # mean of 2 seeds
     "tfm_nope_300k":     (26.8, 11.1, 10.7),
     "tfm_unpaired_300k": (26.6,  6.8, 6.9),   # mean of 2 seeds
-    "tfm_noxattn_5M":    (None, None, None),   # filled after 5M run
+    "tfm_noxattn_5M":    (19.7, 5.3, 6.0),
 }
 
 def _refresh_known():
@@ -81,11 +81,10 @@ def _proj(pos, traj):
 def make_rmse_bar_chart(out: Path):
     _refresh_known()
     methods = [
-        ("IK baseline",        "ik",              C_IK,  "//"),
-        ("MLP  300k",          "mlp_300k",        C_MLP, ""),
-        ("MLP  10M",           "mlp_10M",         C_MLP, ""),
-        ("Transformer  300k",  "tfm_noxattn_300k",C_TFM, ""),
-        ("Transformer  5M",    "tfm_noxattn_5M",  C_TFM, ""),
+        ("IK baseline",   "ik",             C_IK,  "//"),
+        ("MLP  5M",       "mlp_5M",         C_MLP, ""),
+        ("MLP  10M",      "mlp_10M",        C_MLP, ""),
+        ("Transformer 5M","tfm_noxattn_5M", C_TFM, ""),
     ]
     tidx = {t: i for i, t in enumerate(TRAJS)}
     x = np.arange(len(TRAJS)); w = 0.15
@@ -135,7 +134,7 @@ def make_efficiency_curve(out: Path):
         tx = [p[0] for p in tfm_pts]; ty = [p[1][mi] for p in tfm_pts]
         ax.plot(mx, my, "o-", color=C_MLP, lw=2, ms=7, label="MLP", zorder=3)
         ax.plot(tx, ty, "s-", color=C_TFM, lw=2, ms=7,
-                label="Transformer (no xattn)", zorder=4)
+                label="Transformer", zorder=4)
         for pts, col in [(mlp_pts, C_MLP),(tfm_pts, C_TFM)]:
             for steps, vals in pts:
                 ax.annotate(f"{vals[mi]:.1f}mm", xy=(steps, vals[mi]),
@@ -167,10 +166,10 @@ def make_efficiency_curve(out: Path):
 def make_ablation_chart(out: Path):
     _refresh_known()
     ablations = [
-        ("Best: no cross-attn",  "tfm_noxattn_300k",  C_TFM),
-        ("Baseline (full)",      "tfm_base_300k",      "#7ec8e3"),
-        ("No pos embedding",     "tfm_nope_300k",      "#f4a261"),
-        ("Unpaired tokens",      "tfm_unpaired_300k",  "#e76f51"),
+        ("Canonical",              "tfm_noxattn_300k",  C_TFM),
+        ("A: + cross-attention",   "tfm_base_300k",     "#7ec8e3"),
+        ("B: − pos embedding",     "tfm_nope_300k",     "#f4a261"),
+        ("C: unpaired tokens",     "tfm_unpaired_300k", "#e76f51"),
     ]
     tidx = {t: i for i, t in enumerate(TRAJS)}
     x = np.arange(len(TRAJS)); w = 0.20
