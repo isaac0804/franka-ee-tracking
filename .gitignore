@@ -9,6 +9,9 @@ __pycache__/
 # Training results — large binaries; commit only what you explicitly want to
 # preserve (e.g. git add -f results/canonical/final_model.zip)
 results/
+# Track rendered figures and ablation summaries for README image links
+!results/figures/
+!results/eval/ablation.json
 
 # Assets cloned separately (see README setup instructions)
 assets/

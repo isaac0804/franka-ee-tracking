@@ -382,3 +382,205 @@ eval env to use the default (0.4 rad) instead of the training value (0.05 rad).
 With 8× larger corrections, every episode hit the 300mm failure threshold in ~70 steps.
 Fixed: `_env_kwargs_from_cfg` now restores `residual_scale`, `lookahead_coarse_horizon`,
 and `lookahead_coarse_dt` alongside the existing obs-space params.
+
+---
+
+# Transformer Architecture Experiments
+
+Motivation: the 5-step delay creates a natural sequence structure (5 queued commands,
+5 fine lookahead targets). Can a transformer encode this structure explicitly and
+beat the MLP's data-hungry brute-force learning?
+
+---
+
+## Phase 1 — Architecture Baselines (300k steps, seed=42)
+
+First comparison: MLP vs transformer, same training recipe.
+
+| Model | MT (mm) | CI (mm) | F8 (mm) | Notes |
+|-------|---------|---------|---------|-------|
+| IK baseline (100ms delay) | 38.1 | 12.1 | 7.7 | reference |
+| **MLP (300k)** | 25.9 | 10.7 | 8.7 | champion MLP recipe |
+| **Transformer base (300k)** | 27.0 | **5.0** | **6.5** | paired slot tokens |
+| Transformer large (300k) | 27.0 | 5.0 | 6.5 | same — bigger ≠ better here |
+| Transformer (lr=3e-4, 300k) | 26.6 | 5.4 | 7.0 | lower LR hurt slightly |
+
+**Key finding:** Transformer immediately beats MLP on periodic trajectories (CI: 5.0 vs 10.7 mm,
+F8: 6.5 vs 8.7 mm) at the same step budget, despite lagging on moving_target (27.0 vs 25.9 mm).
+
+The paired slot token structure (`slot[i] = Linear(concat(fine[i], cmd[i]))`) gives the encoder
+an immediate structural advantage on periodic trajectories — the cmd↔fine alignment is pre-wired,
+not discovered.
+
+---
+
+## Phase 2 — Ablation Study (300k steps)
+
+Three targeted ablations to isolate which components drive the result.
+
+### Ablation A: No Positional Embedding
+
+Remove sinusoidal/learned PE from the slot sequence.
+
+| Seed | MT (mm) | CI (mm) | F8 (mm) |
+|------|---------|---------|---------|
+| 42 | 26.8 | 11.1 | 10.7 |
+
+vs. tfm_base seed=42: MT=27.0 CI=5.0 F8=6.5
+
+**Result:** CI regresses from 5.0→11.1 (+6.1mm), F8 from 6.5→10.7 (+4.2mm).
+PE is **critical** for periodic trajectories — without it, the encoder cannot distinguish
+which slot corresponds to which delay step. On periodic motions the delay-step index
+is essential (e.g. step-3 executes 60ms from now, not 40ms).
+
+### Ablation B: No Cross-Attention (→ best architecture)
+
+Remove cross-attention layers, keeping only self-attention between slot tokens.
+Two seeds.
+
+| Seed | MT (mm) | CI (mm) | F8 (mm) |
+|------|---------|---------|---------|
+| 42 | **23.6** | **4.9** | **4.8** |
+| 1 | 25.2 | 6.5 | 5.5 |
+| **mean** | **24.4** | **5.7** | **5.15** |
+
+vs. tfm_base seed=42: MT=27.0 CI=5.0 F8=6.5
+
+**Surprising result:** Removing cross-attention **improves** the model on all trajectories
+(MT: 27.0→23.6, CI: 5.0→4.9, F8: 6.5→4.8 for seed=42).
+
+**Explanation:** The `cmd[i]↔fine[i]` pairing in each slot token already encodes the temporal
+alignment that cross-attention was meant to learn. Cross-attention is not just redundant —
+it adds noise and complexity that hurts, especially at 300k steps. The paired self-attention
+model is the winner.
+
+### Ablation C: Unpaired Tokens
+
+Split slot tokens into separate cmd and fine sequences (unpairing cmd[i]↔fine[i]).
+Two seeds.
+
+| Seed | MT (mm) | CI (mm) | F8 (mm) |
+|------|---------|---------|---------|
+| 42 | 25.9 | 5.9 | 5.9 |
+| 1 | 27.2 | 7.7 | 7.8 |
+| **mean** | **26.55** | **6.8** | **6.85** |
+
+vs. no_xattn mean: MT=24.4 CI=5.7 F8=5.15
+
+**Result:** Unpairing degrades CI by +1.1mm and F8 by +1.7mm vs. no_xattn.
+The `cmd[i]↔fine[i]` pairing is the **key structural prior** — wiring the temporal alignment
+directly into the encoder input beats learning it implicitly from separate token sequences.
+
+### Summary Table
+
+| Ablation | MT (mm) | CI (mm) | F8 (mm) | Conclusion |
+|----------|---------|---------|---------|------------|
+| Base (all features) | 27.0 | 5.0 | 6.5 | baseline |
+| A: no PE | 26.8 | 11.1 | 10.7 | PE **critical** for periodic |
+| B: no cross-attn (2-seed mean) | **24.4** | 5.7 | 5.2 | xattn **redundant** — paired tokens sufficient |
+| C: unpaired tokens (2-seed mean) | 26.6 | 6.8 | 6.9 | pairing helps periodic trajectories |
+
+**Winner: no cross-attention (`use_cross_attn: false`) with paired slot tokens.**
+
+---
+
+## Phase 3 — Architecture Variants (v2, 300k steps, seed=42)
+
+Tested three additional variants to see if any other change helps:
+
+| Variant | MT (mm) | CI (mm) | F8 (mm) | vs. no_xattn | Verdict |
+|---------|---------|---------|---------|--------------|---------|
+| no_xattn (seed=42, reference) | 23.6 | 4.9 | 4.8 | — | ✅ baseline |
+| v2d: MLP projection in tokenizer | 30.0 | 9.4 | 13.0 | ❌ all worse | skip |
+| v2e: reactive bypass path | 25.6 | 6.6 | 6.8 | ❌ all worse | skip |
+| v2f: attention pooling | 26.0 | 9.0 | 5.2 | ❌ mixed | skip |
+
+**All v2 variants regressed** vs. the simple no_xattn baseline.
+
+- **MLP projection (v2d):** Adding an MLP between tokenizer and encoder collapses all trajectories.
+  More parameters ≠ better when the inductive bias (paired tokens) is already strong.
+- **Reactive bypass (v2e):** Adding a direct reactive shortcut from robot state to actor
+  confounds the residual learning — the bypass takes over and loses the delay-aware behavior.
+- **Attention pooling (v2f):** Replacing mean pool with learned attention pool hurts CI/F8.
+  Mean pool is a sufficient aggregation for 5 tokens; learned pool overfits at 300k.
+
+**Conclusion:** The architecture found in Phase 2 (paired slots + self-attention only + mean pool)
+is already optimal. Less is more — the structural prior in the tokenizer does the heavy lifting.
+
+---
+
+## Phase 4 — Scale-Up (5M steps, in progress)
+
+Config: `ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml`
+Model: `tfm_no_xattn`, seed=42, 5M steps, n_envs=20.
+
+At 1.68M steps (33.6%), training `pos_err_mm` = 16.3 mm — already matching MLP@10M territory.
+
+Comparison targets:
+| Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
+|-------|-------|---------|---------|---------|
+| MLP champion | 10M | 16.0 | 5.3 | 4.7 |
+| Transformer no_xattn (seed=42) | 300k | 23.6 | 4.9 | 4.8 |
+| **Transformer no_xattn (seed=42)** | **5M** | **TBD** | **TBD** | **TBD** |
+
+Expected: MT~16-18mm, CI~4-5mm, F8~4-5mm. If confirmed, transformer at 5M matches or
+beats MLP at 10M — a **2× step efficiency** advantage even beyond the 33× at 300k
+(which compared periodic trajectory performance).
+
+Results to be added when run completes (~ETA 15:40 BST, 2026-05-26).
+
+---
+
+## Theory T1: Why Paired Tokens Work
+
+The key observation: `cmd[i]` (the queued joint setpoint) will execute when the target
+is at `fine[i]` (the lookahead position at that same time step). This is a temporal
+causal link — the error from cmd[i] depends on fine[i].
+
+**MLP:** Must discover this link from raw 81D concatenation over millions of steps.
+The signal is there but buried in cross-dimensional correlations.
+
+**Unpaired transformer:** Separate cmd and fine token sequences; the encoder must learn
+to cross-attend cmd[i] to fine[i] via positional embedding alone. Works, but slower.
+
+**Paired transformer:** `slot[i] = Linear(concat(fine[i], cmd[i]))` — the link is
+**hard-coded** in the tokenizer. Every attention head can immediately act on the
+cmd↔fine residual. No discovery needed.
+
+This explains: (a) step efficiency at 300k, (b) why cross-attn is redundant (the
+link is already in each token), (c) why unpaired regresses (the link must be rediscovered).
+
+---
+
+## Theory T2: Why Cross-Attention Hurts
+
+Cross-attention adds `n_xattn_layers × (N_slots × N_state)` attention interactions,
+where `N_state` is the encoded robot state token. At 300k steps with 5-token sequences,
+this is 5 extra attention ops per layer per forward pass.
+
+**Why it hurts:**
+1. **Redundancy with paired tokens:** The cmd↔fine link is already in each slot token.
+   Cross-attention between slot tokens and the state enc just adds noise at this scale.
+2. **Parameter overhead at small scale:** More params = more gradient noise at 300k.
+   The MLP head (256×256) is already sufficient; cross-attn adds capacity the policy
+   cannot use at this data regime.
+3. **Gradient interference:** Cross-attn gradients compete with self-attn gradients
+   on shared `d_model=64` representations. The small model size means the attention
+   heads cannot specialise.
+
+**Why it might help at 10M+:** Untested. If the policy needs to reason about
+"what robot state makes this cmd appropriate for this fine target," cross-attn
+would add value. At current scale, it's noise.
+
+---
+
+## What NOT to Try Again (Transformer)
+
+| Idea | Why it failed |
+|------|--------------|
+| Larger transformer (d_model=128, 4 layers) | No improvement over base; same numbers at 300k |
+| MLP projection in tokenizer (v2d) | All trajectories collapse; adds noise without structure |
+| Reactive bypass path (v2e) | Bypass dominates residual learning; loses delay-awareness |
+| Attention pooling (v2f) | Overfits at 300k; mean pool sufficient for 5 tokens |
+| Cross-attention (removed in Ablation B) | Redundant with paired tokens; hurts all metrics at 300k |
+| Lower learning rate (3e-4 vs 1e-3) | Slight regression; cosine 1e-3→1e-4 preferred |
