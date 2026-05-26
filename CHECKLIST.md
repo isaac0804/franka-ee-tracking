@@ -5,109 +5,91 @@ Check items off as they are completed.
 
 ---
 
-## 1. Results (blocker — wait for sweep)
+## 1. Results
 
-- [ ] 2h sweep finishes: corrected ablations (A/B/C) + `tfm_base_5M`
-- [ ] Decide whether to run `tfm_base_10M` for apple-to-apple vs `rs012_10M`
-- [ ] Final results table locked in:
-  - IK baseline / MLP 300k / MLP 5M / MLP 10M / Transformer 5M (or 10M)
-  - All three trajectories: moving_target, circle, figure8
-
----
-
-## 2. Code cleanup
-
-- [ ] Remove one-off bash scripts from repo root — keep only clean entry points:
-  - `train.py`, `evaluate.py`, `sweep.py` → keep
-  - `run_transformer_probes.sh`, `run_ablations.sh`, `run_2h_sweep.sh` → delete or move to `scripts/experiments/`
-  - `eval_posthoc.py` → move to `scripts/` or remove if superseded
-- [ ] Remove or clean scratch folder `yaml/` (appears to be throwaway configs)
-- [ ] Remove `nosmooth_resume.log` and other stray log files from `results/sweep/`
-- [ ] Consolidate `reproduce.sh` — single script that trains + evaluates the best model end-to-end
-- [ ] Audit `record_video.py` — either fix trail visibility (TODO) or remove the trail injection code and document limitation
-- [ ] Consistent naming pass: `cmd_delay` vs `act_delay`, `residual_settled_rmse` vs `residual_rmse` — pick one everywhere
-- [ ] Verify `requirements.txt` is complete and pinned (test in a fresh venv)
+- [x] Corrected ablations A/B/C (2 seeds each) — all complete
+- [x] Final architecture locked: `tfm_no_xattn` (paired slots, self-attention only)
+- [x] Final results table in README: IK / MLP 300k / MLP 5M / MLP 10M / Tfm 300k / Tfm 5M
+- [ ] 5M run completes — fill TBD rows in README (ETA ~15:40 BST, 2026-05-26)
 
 ---
 
-## 3. Documentation
+## 2. Code cleanup ✅
 
-### README.md
-- [ ] Problem statement: Franka EE tracking, MuJoCo, 5-step actuation delay
-- [ ] Approach overview: Residual PPO — what it is, why residual, why PPO
-- [ ] Architecture section with diagram (link `results/figures/transformer_architecture.png`)
-- [ ] Results table (IK / MLP / Transformer) with concise takeaway
-- [ ] Quickstart section:
-  ```bash
-  pip install -r requirements.txt
-  python train.py --config ee_tracking/configs/transformer/tfm_base_5M.yaml --out results/my_run
-  python evaluate.py ablation --model results/my_run/final_model.zip
-  ```
-- [ ] Reproducing best results section
-- [ ] License + acknowledgements
+- [x] Remove one-off bash scripts from repo root → `scripts/experiments/`
+- [x] Remove scratch folder `yaml/` (deleted)
+- [x] Remove stale probe/sweep configs (`ee_tracking/configs/probe/`, `ee_tracking/configs/sweep/`)
+- [x] `reproduce.sh` — trains + evaluates best model end-to-end
+- [x] `record_video.py` — simplified (trails removed, target sphere only; explained in header)
+- [x] `requirements.txt` — range-pinned with tested version comment block
+- [ ] Verify `requirements.txt` in a fresh venv (deferred — needs clean env)
 
-### EXPERIMENTS.md
-- [ ] Add final transformer probe findings (corrected A/B/C ablations)
-- [ ] Add `tfm_base_5M` result when available
-- [ ] Add entry for the two bugs found (train.py net_arch passthrough, evaluate.py import)
+---
 
-### REPORT.md
-- [ ] Update with transformer architecture section
-- [ ] Update with final results and ablation analysis
-- [ ] Write the one-paragraph narrative:
-  > *"cmd[i] executes when the target is at fine[i] — pairing them as a slot token
-  > wires in the delay structure the MLP must discover from scratch. At 300k steps
-  > the transformer matches what the MLP needs 10M steps to achieve on periodic
-  > trajectories (CI: 5.0 vs 10.7mm at 300k; MLP reaches 5.3mm only at 10M)."*
+## 3. Documentation ✅
+
+### README.md ✅
+- [x] Problem statement: Franka EE tracking, MuJoCo, 5-step actuation delay
+- [x] Approach overview: Residual PPO, residual control, observation design
+- [x] Architecture section with ASCII diagram (paired slot tokens)
+- [x] Results table (IK / MLP / Transformer) with concise takeaway
+- [x] Ablation table (A/B/C, 2 seeds each, footnotes)
+- [x] Quickstart section (5 commands: install, assets, train, eval, tensorboard)
+- [x] Design choices section (state, action, reward, trajectories, metrics, uncertainty)
+- [x] Acknowledgements + repo structure
+- [ ] Replace TODO GIF placeholder with final tracking animation (after 5M run)
+
+### EXPERIMENTS.md ✅
+- [x] MLP phase: full probe log, theories, overnight sweep, confirmed recipe
+- [x] Transformer phase: phases 1–4, ablation A/B/C, v2 variants, theories T1/T2
+- [x] Phase 4 (5M) status: TBD row to be filled when run completes
+
+### REPORT.md ✅
+- [x] Updated with transformer architecture section and ablation results
+- [x] Full project narrative: what didn't work → what did → current best
+- [x] Key design decisions table
+- [x] Limitations and future work
 
 ---
 
 ## 4. Figures
 
-- [ ] **Architecture diagram** — regenerate `draw_transformer.py` once architecture is finalised
-- [ ] **Training curves** — reward + pos_err vs steps for MLP vs Transformer (pull from TensorBoard)
-  - Script: `make_training_curves.py` (to write)
-  - Show: transformer reaches CI=5mm faster than MLP
-- [ ] **3-way trajectory comparison** — extend `make_figures.py` to plot IK / MLP / Transformer on same axes
-- [ ] **Ablation bar chart** — CI and F8 RMSE for: full model / no PE / no cross-attn / unpaired
-- [ ] **Per-trajectory RMSE summary bar chart** — clean final-results figure for README
-- [ ] **Tracking video** — `record_video.py` side-by-side IK vs Transformer
-  - [ ] Fix trail visibility (sphere radius / alpha issue, marked TODO in record_video.py)
-  - [ ] Record one video per trajectory type (moving_target, circle, figure8)
-  - [ ] Export as GIF for README embed
+- [x] `rmse_comparison.png` — IK / MLP / Transformer bar chart (static)
+- [x] `efficiency_curve.png` — steps vs RMSE for MLP and Transformer
+- [x] `ablation_bar.png` — CI/F8 RMSE for base / no-PE / no-xattn / unpaired
+- [x] `transformer_architecture.png` — architecture diagram
+- [x] `comparison_{traj}.png` — 3-way IK/MLP/Transformer trajectory comparison
+- [ ] Update static figures with 5M result (`python scripts/make_figures.py --static-only`)
+- [ ] Generate tracking animation for README GIF (`python scripts/make_animation.py --model <5M> --all`)
+- [ ] Update `efficiency_curve.png` with 5M data point
 
 ---
 
 ## 5. Reproducibility
 
-- [ ] `requirements.txt` — pinned versions, tested in clean venv
-- [ ] `reproduce.sh` — trains best model from scratch, evaluates, saves figures
-- [ ] Pre-trained weights — either commit to `models/` (if small enough) or GitHub Release
-- [ ] Seed parity: confirm `seed=42` in best config gives deterministic training
-- [ ] Document compute requirements: "~55 min on [CPU spec] for tfm_base_5M"
+- [x] `reproduce.sh` — trains best model from scratch, evaluates, saves figures
+- [x] `ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml` — canonical best config
+- [x] `ee_tracking/configs/mlp/mlp_best_10M.yaml` — canonical MLP champion config
+- [ ] Pre-trained weights — consider GitHub Release or `results/canonical/` (after 5M finishes)
+- [ ] Document compute requirements in README (currently ~55 min on the test machine)
 
 ---
 
-## 6. Polish
+## 6. Polish (after 5M run)
 
+- [ ] Add demo GIF to README header (best tracking animation — `make_animation.py`)
+- [ ] Final git commit with 5M results + updated figures + animation
 - [ ] GitHub repo description + topics: `reinforcement-learning`, `robotics`, `mujoco`, `transformer`, `franka`
-- [ ] Add a demo GIF to README header (best tracking video)
 - [ ] Add badges: Python version, license
-- [ ] Tag a release `v1.0` once the above is done
+- [ ] Tag release `v1.0`
 
 ---
 
-## Priority order
+## Deferred (after submission)
 
-| # | Task | Est. time | Blocks |
-|---|---|---|---|
-| 1 | Wait for 2h sweep results | — | Everything |
-| 2 | README (core sections) | 1 day | Publicity |
-| 3 | Training curves figure | 4 hrs | Report / README |
-| 4 | 3-way comparison figure | 4 hrs | Report / README |
-| 5 | Ablation bar chart | 2 hrs | Report |
-| 6 | Code cleanup + reproduce.sh | 1 day | Submission |
-| 7 | Fix video trails | 1 day | Demo GIF |
-| 8 | requirements.txt + fresh venv test | 2 hrs | Reproducibility |
-| 9 | EXPERIMENTS.md + REPORT.md update | 4 hrs | Documentation |
-| 10 | Architecture diagram update | 2 hrs | README |
+- [ ] **Orientation tracking** — extend obs/action to 6-DoF (position + quaternion)
+  - Architecture ready: same paired tokens, just wider fine lookahead
+  - Deferred to maintain focus on position tracking for submission
+- [ ] **Oracle lookahead → real predictor** — Kalman smoother or learned predictor over target history
+- [ ] **Post-hoc smoothing** — 2 Hz Butterworth at inference for hardware deployment
+- [ ] **Domain randomisation** — inertia, damping, contact params for sim-to-real

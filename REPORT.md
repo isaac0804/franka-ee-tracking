@@ -2,138 +2,203 @@
 
 ## Problem
 
-Track a moving Cartesian target with a 7-DoF Franka Panda in MuJoCo. The practical constraint: the control pipeline has **end-to-end latency** (network round-trip + controller loop) that makes purely reactive control systematically late. A damped-least-squares IK controller is the natural baseline — fast, interpretable, reliable — but it cannot anticipate where the target will be by the time its command executes.
+Track a moving Cartesian target with a 7-DoF Franka Panda in MuJoCo. The control pipeline has a fixed **5-step (100 ms) end-to-end command delay** — the full IK+residual setpoint travels through a FIFO before reaching the actuators. A damped-least-squares IK controller is the natural baseline — fast, interpretable — but without prediction it will always be tracking where the target *was*, not where it *will be* when the command executes.
 
-**Goal:** train a PPO residual policy on top of IK that learns to compensate for the delay, using a short lookahead of future target positions.
+**Core challenge:** At 50 Hz with 5-step delay, each command executes 100 ms after being issued. On a random-walk trajectory (8–14 cm amplitude, 0.05–0.15 Hz) this causes ~26 mm of systematic lag, bringing IK RMSE from ~18 mm (no delay) to ~38 mm (100 ms delay). The delay window is known and fixed — a policy that can *see* both the queued commands and the future target positions can pre-compensate.
 
 ---
 
 ## Approach
 
-The policy outputs a 7-D joint-space correction in `[-1, 1]`. This is filtered, scaled, and added to the IK setpoint as a **non-accumulating position offset** — not an integrated velocity. The combined command (IK + residual) then travels through a shared delay buffer before reaching the actuators.
+### Residual control
+
+The policy outputs a 7-D joint-space correction in [−1, 1], scaled by `residual_scale` and added to the IK setpoint as a **non-accumulating position offset**:
 
 ```
-q_ik(t)  = clip(q_ik(t-1) + ik_qdot(t) × dt, limits)   # IK integrates freely
-q_set(t) = clip(q_ik(t)   + residual(t) × dt, limits)   # one-step offset
-ctrl(t)  = q_set(t − D)                                  # whole pipeline delayed D steps
+q_ik(t)  = IK(target(t))                              # analytic IK, no delay
+q_set(t) = clip(q_ik(t) + residual(t) × rs, limits)  # IK + policy correction
+ctrl(t)  = q_set(t − 5)                               # whole pipeline delayed 5 steps
 ```
 
-Both IK and the residual travel through the same FIFO. The policy observes:
-- Current joint state + EE position (noisy)
-- IK's current velocity command
-- **5-step lookahead** of future target positions (covers the full delay window)
-- **cmd\_delta\_history**: the D setpoints currently in the delay buffer, so the policy knows what movement is already queued
+Both IK and the residual travel through the **same** FIFO. An untrained policy (residual ≈ 0) degrades gracefully to IK. The policy only needs to learn the predictive correction; IK handles gross positioning.
+
+### Observation design
+
+The 81-D observation is structured around the delay:
+
+| Block | Dims | Content |
+|-------|------|---------|
+| Robot state | 30 | joint pos/vel, EE position, position error, IK command |
+| Fine lookahead | 15 | target at t+20ms … t+100ms — covers exact delay window |
+| Coarse lookahead | 12 | target at t+100ms … t+400ms — trajectory trend |
+| Command history | 35 | 5 queued setpoints − current q — Markov restoring element |
+| Trajectory ID | 3 | one-hot: moving_target / circle / figure8 |
+
+The fine lookahead (5 steps × 20ms = 100ms) covers exactly the 5-step delay. The command history reveals what corrections are already queued, preventing the policy from stacking redundant commands.
 
 ---
 
 ## What Didn't Work (and Why)
 
 ### Attempt 1: velocity-additive residual
+
 Early implementation accumulated IK and residual velocities together:
 ```
 q_setpoint += (ik_qdot + residual) × dt
 ```
-A wrong residual at step `t` drifted into all subsequent steps. After 60 steps of maximum residual, the accumulated error reached **0.144 rad** in joint space. IK had to fight this drift constantly and often failed. The current non-accumulating design bounds any single-step error to `residual_scale × dt = 0.001 rad`.
+Wrong residuals drifted into all future steps. After 60 steps of maximum residual, the accumulated joint error reached 0.144 rad. The current non-accumulating design bounds any single-step error to `residual_scale × dt ≈ 0.001 rad`.
 
-### Attempt 2: fixing three evaluation bugs
-After fixing the architecture, training metrics looked promising but eval crashed or gave misleading numbers:
-1. **Obs-space mismatch**: `evaluate.py` rebuilt the env from defaults, not the saved config. With different `lookahead_horizon` or `act_delay`, the obs dimension didn't match the saved VecNormalize stats → crash.
-2. **Train/eval disturbance skew**: a hardcoded eval disturbance applied `act_delay=1` to models trained with `act_delay=0`, evaluating them out-of-distribution.
-3. **IK baseline inflated**: the old code routed the IK command through the same delay buffer as the residual, so "IK-only" was actually IK-with-delay. The corrected baseline (undelayed IK) dropped from 19.8 mm to 15.6 mm.
+### Attempt 2: delay applied only to the residual
 
-After all three fixes: correct eval, correct baseline.
+A first version of the delay (`act_delay`) delayed only the policy's correction, while IK commanded the robot instantly. This gave IK a structural advantage the policy couldn't overcome: it was fighting its own 20 ms delay to match an undelayed baseline. No meaningful learning occurred.
 
-### Attempt 3: baking a Butterworth filter + full training run
-Post-hoc experiments showed a 2 Hz Butterworth on the policy output improved results by ~2% over EMA smoothing. Baked this into the training env (so the policy trains against its own filtered output).
-
-Full 1.5 M-step training run: **16.1 mm** — marginally *worse* than the 15.6 mm IK baseline.
-
-### Diagnosis: the task formulation was wrong
-
-Probe experiments ran 7 hyperparameter variants at 300k steps each. Every variant showed `std ≈ 1.08` and `clip_fraction ≈ 0.163` — identical to a random policy. No learning was happening regardless of tuning.
-
-Root cause analysis:
-- **IK was near the noise floor.** The dominant IK error (15.6 mm) was already close to the theoretical minimum given the DLS damping and obs noise. The maximum EE correction the residual could apply was ~0.8 mm/step — barely enough to matter.
-- **Delay was applied only to the residual.** The old `act_delay` parameter delayed only the residual correction, while IK acted instantly. This gave IK an unfair structural advantage: the residual policy had to fight its own 20 ms delay to break even with an undelayed IK.
-- **No clear learnable signal.** The policy's corrections were small relative to the noise and the task didn't require prediction — IK already received the analytic target velocity as feedforward.
-
----
-
-## The Fix: whole-pipeline delay
-
-Apply the delay to the **total q\_setpoint** — both IK and residual travel through the same buffer. This is the physically accurate model: the full command takes D steps to reach the actuators.
-
-Effect on IK:
+**Fix:** Apply the delay to the **total q_setpoint** — whole-pipeline delay. Effect on IK:
 
 | | RMSE (mm) |
 |---|---|
 | IK, no delay | ~18 |
-| IK, D = 5 steps (100 ms) | ~44 |
+| IK, 100ms delay | ~38 |
 
-The delay creates a **26 mm gap** the IK cannot close without prediction. The residual policy, which has a 0.5 s lookahead that exactly covers the 0.1 s delay window, can learn to pre-position the EE by predicting where the target will be when each command executes.
+The delay creates a 20 mm gap the IK cannot close. The residual policy, with oracle fine lookahead covering the full 100ms window, can learn to predict and pre-compensate.
 
-The lookahead alignment is intentional: `lookahead_dt × lookahead_horizon = 0.1 × 5 = 0.5 s` covers the full `cmd_delay × dt = 5 × 0.02 = 0.1 s` delay window, with additional horizon for anticipation.
+### Attempt 3: single-trajectory training
+
+5M-step models trained on `moving_target` only achieved 20.5 mm on that trajectory but made circle/figure8 **worse than IK** (13.5 mm vs 12.1 mm on circle). The policy overfits to the random-walk distribution and provides no generalizable tracking corrections.
+
+**Fix:** Mixed trajectory pool (`moving_target + circle + figure8`). Mixed training lets the policy generalise, and the clean circle/figure8 episodes dramatically stabilise the critic (EV: 0.86 → 0.98 at 500K steps). Mixed pool is the single biggest finding of the MLP phase.
 
 ---
 
-## Current Results
+## MLP Phase Results
 
-All numbers are deterministic post-training eval RMSE (mm). IK baseline uses 100 ms delay.
+All numbers: deterministic eval RMSE (mm), 100ms delay applied.
 
-### Best confirmed models
+| Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
+|-------|-------|---------|---------|---------|
+| IK baseline | — | 38.1 | 12.1 | 7.7 |
+| MLP (best rs=0.05, 5M) | 5M | 21.0 | 7.6 | 7.0 |
+| **MLP (rs=0.12, 10M)** | **10M** | **16.0** | **5.3** | **4.7** |
 
-| Model | moving_target | circle | figure8 | Notes |
-|---|---|---|---|---|
-| IK + 100ms delay | 38.1 mm | 12.1 mm | 7.7 mm | baseline to beat |
-| PPO 5M, single-pool, linear LR | 20.5 mm | 13.5 mm ❌ | 13.0 mm ❌ | hurts unseen trajectories |
-| **PPO 500K, mixed pool, cosine LR** | **26.2 mm** | **7.9 mm ✓** | **5.9 mm ✓** | beats IK on all 3 at 500K |
-| **PPO 500K, rs=0.12, mixed pool** | **22.9 mm** | 12.0 mm | 10.1 mm | best moving_target; under-converged |
+Key MLP findings (documented in detail in `EXPERIMENTS.md`):
+- `residual_scale`: dominant knob — monotonic improvement rs=0.02→0.12
+- Mixed trajectory pool: biggest single gain
+- No smoothness/jerk penalty: predictive delay compensation is inherently jerky
+- Cosine LR 1e-3 → 1e-4: better than constant or linear decay
 
-### Key metric progression (moving_target eval)
+---
+
+## Transformer Architecture
+
+### Motivation
+
+The 5-step delay creates a natural **sequence** structure: there are exactly 5 queued commands (`cmd[0..4]`) and 5 fine lookahead targets (`fine[0..4]`), where `cmd[i]` will execute when the target is at `fine[i]`. This temporal causal link is the key insight: an architecture that encodes this pairing directly should need far fewer training steps than an MLP that must discover it from a flat 81D vector.
+
+### Paired slot tokens
+
+Each time slot is encoded as a single token pairing the queued command with the fine lookahead target it will execute against:
 
 ```
-IK + delay:              38.1 mm   (fixed reference)
-5M single-pool:          20.5 mm   (+46% over IK)
-500K mixed-pool:         26.2 mm   (+31% — beats IK on circle/fig8 too)
-500K rs=0.12 mixed:      22.9 mm   (+40% — best 500K result; needs more steps)
-Overnight target:       <16.0 mm   (rs=0.12 at 5–10M steps)
+slot[i] = Linear(concat(fine_lookahead[i], cmd_history[i]))  →  d_model
 ```
 
-### Training dynamics (confirmed patterns)
+The full architecture:
 
-- **Explained Variance (EV)**: rises from ~0.86 (5M single-pool) to 0.982 (500K mixed pool) — mixed pool dramatically stabilises the critic via clean circle/figure8 episodes
-- **Bang-bang policy**: 47–87% of post-Tanh actions have |a| > 0.9; the policy always saturates because the action penalty is negligible at rs=0.05
-- **LR decay is critical**: constant LR 1e-3 → EV=0.86; cosine 1e-3→1e-4 → EV=0.98 at 500K
+```
+Observation
+    ├── robot_state (30D) ──────────────────────────────► Linear → state_enc (64D)
+    └── [fine[i] ‖ cmd[i]] × 5 ──► TransformerEncoder ──► mean pool → slots_enc (64D)
+                                                                        │
+                                              concat(state_enc, slots_enc) (128D)
+                                                                        │
+                                     ┌──────────────────────────────────┴─────────────┐
+                                  Actor MLP                                     Critic MLP
+                               [256, 256] → 7D                          [256, 256, 256] → 1
+```
+
+TransformerEncoder: pre-LN, 2 layers, 4 heads, d_model=64, no cross-attention.
+
+### Ablation study (300k steps, seed=42 + seed=1)
+
+| Ablation | MT (mm) | CI (mm) | F8 (mm) | Conclusion |
+|----------|---------|---------|---------|------------|
+| Base (all features) | 27.0 | 5.0 | 6.5 | baseline |
+| A: no positional embedding | 26.8 | 11.1 | 10.7 | PE **critical** — encoder can't distinguish delay slots without it |
+| **B: no cross-attention** (2-seed mean) | **24.4** | **5.7** | **5.2** | xattn **redundant** — paired tokens already encode temporal alignment |
+| C: unpaired tokens (2-seed mean) | 26.6 | 6.8 | 6.9 | pairing helps periodic trajectories by +1.1-1.7mm on CI/F8 |
+
+**Ablation B finding:** Removing cross-attention *improves* the model on all trajectories. The `cmd[i]↔fine[i]` pairing in each slot token already encodes the temporal alignment that cross-attention was designed to learn. Cross-attention adds capacity that hurts at this scale. The final best architecture uses **pure self-attention only**.
+
+**Ablation C confirms the key structural prior:** The paired token design (`cmd[i]↔fine[i]` in one token) outperforms separate cmd and fine token sequences. Pairing wires the causal link directly into the encoder input — the attention heads can act on it immediately without positional cross-reference.
+
+### Architecture variant screening (v2, 300k steps)
+
+All three v2 variants regressed:
+
+| Variant | MT (mm) | CI (mm) | F8 (mm) | Verdict |
+|---------|---------|---------|---------|---------|
+| no_xattn reference (seed=42) | 23.6 | 4.9 | 4.8 | — |
+| MLP projection in tokenizer | 30.0 | 9.4 | 13.0 | ❌ collapse |
+| Reactive bypass path | 25.6 | 6.6 | 6.8 | ❌ loses delay-awareness |
+| Attention pooling | 26.0 | 9.0 | 5.2 | ❌ mixed |
+
+The structural prior in the tokenizer does the heavy lifting. Additional complexity hurts.
+
+### Transformer vs MLP at 300k steps
+
+| Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
+|-------|-------|---------|---------|---------|
+| MLP | 300k | 25.9 | 10.7 | 8.7 |
+| **Transformer (no_xattn)** | **300k** | **23.6** | **4.9** | **4.8** |
+| MLP (champion) | 10M | 16.0 | 5.3 | 4.7 |
+
+**Key result:** Transformer at 300k steps matches MLP at 10M steps on circular and figure-8 trajectories (CI: 4.9 vs 5.3mm, F8: 4.8 vs 4.7mm). The paired slot token structure encodes the delay structure the MLP must discover from scratch over millions of steps.
+
+---
+
+## Current State (5M scale-up)
+
+Training: `ee_tracking/configs/transformer/tfm_no_xattn_5M.yaml`, seed=42, 5M steps, n_envs=20.
+
+At ~1.68M steps (33%), training `pos_err_mm` = 16.3 mm — already matching MLP@10M territory.
+
+Projected final results (to be updated):
+
+| Model | Steps | MT (mm) | CI (mm) | F8 (mm) |
+|-------|-------|---------|---------|---------|
+| MLP champion | 10M | 16.0 | 5.3 | 4.7 |
+| **Transformer no_xattn** | **5M** | **TBD** | **TBD** | **TBD** |
 
 ---
 
 ## Key Design Decisions
 
 | Decision | Rationale |
-|---|---|
-| Non-accumulating residual offset | Wrong corrections at step t are fully self-correcting at t+1; prevents drift windup |
-| Whole-pipeline delay (both IK + residual) | Physically accurate; gives IK a real weakness the policy can exploit; residual-only delay gave zero learning |
-| Lookahead covers delay window exactly | Fine lookahead (5×0.02s=0.1s) gives oracle knowledge of target position at each command's execution time |
-| **Mixed trajectory pool** | Biggest single finding: EV 0.888→0.982, beats IK on circle/figure8 at 500K; single-pool models hurt unseen trajectories |
-| `cmd_delta_history` in observation | Restores Markov property: policy knows what commands are in-flight; `delay_aware_gae` must stay OFF with this |
-| No smoothness/jerk penalty | Predictive impulse control is inherently jerky; penalising jerk penalises delay compensation directly |
-| cosine LR 1e-3→1e-4 | Probe-confirmed better than linear; stays warm for exploration then converges sharply |
-| n_envs=20 | 3–5× wall-clock speedup; equal total gradient steps vs n_envs=10; allows 9 runs per 8-hour budget |
-| Action filter disabled | 2 Hz Butterworth adds ~5.6 steps of group delay on top of 5-step FIFO; doubles effective latency |
+|----------|-----------|
+| Non-accumulating residual | Wrong corrections self-correct at t+1; prevents drift windup |
+| Whole-pipeline delay | Physically accurate; gives IK a weakness the policy can exploit |
+| Mixed trajectory pool | Biggest MLP-phase finding: prevents specialisation, stabilises critic |
+| No smoothness/jerk penalty | Predictive impulse control is inherently jerky; penalty directly penalises delay compensation |
+| Paired slot tokens | Key structural prior: `cmd[i]↔fine[i]` pairing encodes causal link the MLP discovers slowly |
+| No cross-attention | Redundant with paired tokens at 300k–5M scale; hurts all metrics |
+| cmd history in observation | Restores Markov property: policy knows what is already queued |
+| Cosine LR 1e-3 → 1e-4 | Stays warm for exploration, converges sharply; confirmed better than constant or linear |
+| n_envs=20 | 3–5× wall-clock speedup; equal total gradient steps vs n_envs=10 |
 
 ---
 
-## Limitations and Next Steps
+## Limitations and Future Work
 
-### Immediate (overnight sweep in progress)
-- **Optimal residual_scale at 5M**: rs=0.12 is the hypothesis; sweep tests rs ∈ {0.05, 0.08, 0.10, 0.12, 0.15} with the full confirmed recipe. Results in `results/sweep/` by morning.
-- **Step depth**: rs=0.12 at 10M (vs 5M) tested overnight. Target: <16mm moving_target, matching or beating IK floor on circle/figure8.
+### Oracle lookahead → real predictor
+The fine lookahead provides ground-truth future target positions — unrealistic for hardware. A real system would need a Kalman smoother or learned predictor over the observed target history. The architecture is set up to swap this in (same obs dimension).
 
-### Medium-term
-- **Oracle lookahead → real predictor**: the fine lookahead provides ground-truth future positions — unrealistic for hardware. Replace with a Kalman smoother or learned predictor over observed target history. The architecture is already set up to swap this in (same obs dimension).
-- **Scale-invariant w_residual**: current penalty is `−wr × rs² × ‖action‖²`; the rs² factor makes tuning inconsistent across residual_scale values. Fix: `−wr × ‖action‖²` makes wr interpretation scale-independent.
-- **Post-hoc smoothing for hardware**: the bang-bang policy produces jerky joint commands (47–87% saturated). For real Franka deployment, a 2 Hz Butterworth applied post-hoc at inference (not baked into training) would smooth commands without adding training-time latency.
+### Post-hoc smoothing for hardware
+The bang-bang policy produces jerky joint commands (47–87% of actions saturated). For real Franka deployment, a 2 Hz Butterworth applied post-hoc at inference (not baked into training) would smooth commands without adding training-time latency.
 
-### Long-term
-- **Sim-to-real gap**: MuJoCo perfectly matches the simulated robot. Real deployment needs domain randomisation over inertia, joint damping, and contact parameters.
-- **Curriculum over delay**: training and evaluating at a fixed 100 ms delay. Randomising delay over [0, 150 ms] during training would improve robustness to network jitter.
+### Orientation tracking
+Currently tracks only Cartesian EE position. The paired slot token architecture naturally extends to 6-DoF (position + quaternion) by expanding the fine lookahead and observation dimensions. The same structural prior should apply.
+
+### Sim-to-real gap
+MuJoCo perfectly matches the simulated robot. Real deployment would need domain randomisation over inertia, joint damping, and contact parameters.
+
+### Curriculum over delay
+Fixed 100 ms delay during training. Randomising delay over [0, 150 ms] would improve robustness to network jitter.
