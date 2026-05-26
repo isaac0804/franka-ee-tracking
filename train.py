@@ -32,6 +32,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from ee_tracking.env.franka_tracking_env import EnvConfig, FrankaTrackingEnv
+from ee_tracking.env.franka_tracking_6dof_env import Env6DoFConfig, FrankaTracking6DoFEnv
 from ee_tracking.env.disturbances import DisturbanceConfig
 from ee_tracking.policies.gelu_policy import POLICY_REGISTRY
 from ee_tracking.policies.transformer_policy import TRANSFORMER_POLICY_REGISTRY
@@ -48,9 +49,18 @@ def load_yaml(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def env_config_from_dict(d: dict) -> EnvConfig:
+def _disturbance_from_dict(dist: dict) -> DisturbanceConfig:
+    return DisturbanceConfig(
+        obs_pos_noise=dist.get("obs_pos_noise", 0.005),
+        obs_jnt_noise=dist.get("obs_jnt_noise", 0.002),
+        cmd_delay=dist.get("cmd_delay", dist.get("act_delay", 5)),
+    )
+
+
+def _common_env_kwargs(d: dict) -> dict:
+    """Fields shared by EnvConfig and Env6DoFConfig."""
     dist = d.get("disturbance", {})
-    return EnvConfig(
+    return dict(
         control_hz=d.get("control_hz", 50.0),
         episode_seconds=d.get("episode_seconds", 6.0),
         randomize_trajectory=d.get("randomize_trajectory", True),
@@ -71,14 +81,23 @@ def env_config_from_dict(d: dict) -> EnvConfig:
         lookahead_coarse_horizon=d.get("lookahead_coarse_horizon", 4),
         lookahead_coarse_dt=d.get("lookahead_coarse_dt", 0.10),
         action_filter_hz=d.get("action_filter_hz", 0.0),
-        disturbance=DisturbanceConfig(
-            obs_pos_noise=dist.get("obs_pos_noise", 0.005),
-            obs_jnt_noise=dist.get("obs_jnt_noise", 0.002),
-            # cmd_delay is the new name; fall back to act_delay for old configs
-            cmd_delay=dist.get("cmd_delay", dist.get("act_delay", 5)),
-        ),
+        disturbance=_disturbance_from_dict(dist),
         seed=d.get("seed", 0),
     )
+
+
+def env_config_from_dict(d: dict) -> EnvConfig | Env6DoFConfig:
+    """Build EnvConfig or Env6DoFConfig depending on `env_class` field."""
+    env_class = d.get("env_class", "FrankaTrackingEnv")
+    kwargs = _common_env_kwargs(d)
+
+    if env_class == "FrankaTracking6DoFEnv":
+        return Env6DoFConfig(
+            **kwargs,
+            kp_ori=d.get("kp_ori", 3.0),
+            w_ori=d.get("w_ori", 2.0),
+        )
+    return EnvConfig(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +105,21 @@ def env_config_from_dict(d: dict) -> EnvConfig:
 # ---------------------------------------------------------------------------
 
 class TrackingCallback(BaseCallback):
-    """Records mean EE error (mm) and residual norm every log_freq steps."""
+    """Records mean EE error (mm), orientation error (deg), and residual norm every log_freq steps."""
 
     def __init__(self, log_freq: int = 10_000, verbose: int = 0):
         super().__init__(verbose)
         self.log_freq = log_freq
         self._pos_errs: list[float] = []
+        self._ori_errs: list[float] = []
         self._residual_norms: list[float] = []
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
             if "pos_err" in info:
                 self._pos_errs.append(float(info["pos_err"]) * 1000.0)
+            if "ori_err_deg" in info:
+                self._ori_errs.append(float(info["ori_err_deg"]))
             if "residual_norm" in info:
                 self._residual_norms.append(float(info["residual_norm"]))
 
@@ -105,6 +127,9 @@ class TrackingCallback(BaseCallback):
             if self._pos_errs:
                 self.logger.record("tracking/pos_err_mm", np.mean(self._pos_errs))
                 self._pos_errs.clear()
+            if self._ori_errs:
+                self.logger.record("tracking/ori_err_deg", np.mean(self._ori_errs))
+                self._ori_errs.clear()
             if self._residual_norms:
                 self.logger.record("tracking/residual_norm", np.mean(self._residual_norms))
                 self._residual_norms.clear()
@@ -142,6 +167,11 @@ def main():
     total_timesteps = train_d.get("total_timesteps", 1_500_000)
     seed = train_d.get("seed", 0)
 
+    # Resolve which env class to instantiate
+    env_class_name = env_d.get("env_class", "FrankaTrackingEnv")
+    is_6dof = (env_class_name == "FrankaTracking6DoFEnv")
+    EnvClass = FrankaTracking6DoFEnv if is_6dof else FrankaTrackingEnv
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,9 +180,11 @@ def main():
         yaml.dump(cfg, f)
 
     print(f"\n{'='*60}")
+    print(f"  env            = {env_class_name}")
     print(f"  residual_scale = {env_config.residual_scale}")
     print(f"  w_residual     = {env_config.w_residual}")
-    print(f"  w_delta_pos    = {env_config.w_delta_pos}")
+    if is_6dof:
+        print(f"  w_ori          = {env_config.w_ori}")
     print(f"  trajectory     = {list(env_config.trajectory_pool)}")
     print(f"  n_envs         = {n_envs}   |   timesteps = {total_timesteps:,}")
     print(f"  out            = {out_dir}")
@@ -160,7 +192,7 @@ def main():
 
     # Vectorised env
     def make_env():
-        return FrankaTrackingEnv(env_config)
+        return EnvClass(env_config)
 
     vec_env = SubprocVecEnv([make_env] * n_envs)
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)

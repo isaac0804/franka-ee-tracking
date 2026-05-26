@@ -72,8 +72,12 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 
 # ── constants ──────────────────────────────────────────────────────────────────
 
-# Fixed robot-state dims in obs: q(7)+qdot(7)+ee_pos(3)+ee_err(3)+target_vel(3)+ik_qdot(7)
-N_ROBOT_STATE = 30
+# Robot-state dims for position-only obs (30) and 6-DoF obs (40)
+N_ROBOT_STATE_POS = 30   # q(7)+qdot(7)+ee_pos(3)+ee_err(3)+target_vel(3)+ik_qdot(7)
+N_ROBOT_STATE_6DOF = 40  # + ee_quat(4)+ori_err(3)+ee_angvel(3)
+
+# Keep legacy alias so any external code importing N_ROBOT_STATE still works
+N_ROBOT_STATE = N_ROBOT_STATE_POS
 
 
 # ── building blocks ────────────────────────────────────────────────────────────
@@ -150,71 +154,90 @@ class DelayTransformerExtractor(nn.Module):
     """Shared feature extractor used by both actor and critic.
 
     Obs layout assumed (must match env._compute_observation):
+
+    Position-only (fine_dim=3, coarse_dim=3, robot_state_dim=30):
         [robot_state(30) | fine(n_fine×3) | coarse(n_coarse×3) | cmd(n_cmd×7) | traj_onehot(n_pool)]
 
-    n_pool is inferred as: feature_dim - N_ROBOT_STATE - n_fine*3 - n_coarse*3 - n_cmd*7
+    6-DoF orientation (fine_dim=7, coarse_dim=7, robot_state_dim=40):
+        [robot_state(40) | fine(n_fine×7) | coarse(n_coarse×7) | cmd(n_cmd×7) | traj_onehot(n_pool)]
+        Each fine/coarse step is pos(3)+quat(4)=7D; paired slot token is fine[i](7)+cmd[i](7)=14D.
+
+    n_pool is inferred as:
+        feature_dim - robot_state_dim - n_fine*fine_dim - n_coarse*coarse_dim - n_cmd*7
     """
 
-    FINE_DIM   = 3
-    COARSE_DIM = 3
-    CMD_DIM    = 7
+    CMD_DIM = 7
 
     def __init__(
         self,
         feature_dim: int,
         *,
-        n_fine:         int = 5,
-        n_coarse:       int = 4,
-        n_cmd:          int = 5,
-        d_model:        int = 64,
-        nhead:          int = 4,
-        n_enc_layers:   int = 2,
-        n_xattn_layers: int = 1,
-        ffn_mult:       int = 2,    # FFN width = ffn_mult × d_model (standard = 4)
+        n_fine:           int = 5,
+        n_coarse:         int = 4,
+        n_cmd:            int = 5,
+        d_model:          int = 64,
+        nhead:            int = 4,
+        n_enc_layers:     int = 2,
+        n_xattn_layers:   int = 1,
+        ffn_mult:         int = 2,    # FFN width = ffn_mult × d_model
+        # ── obs layout dims (set to 7/7/40 for 6-DoF) ──
+        fine_dim:         int = 3,    # dims per fine lookahead step (3=pos, 7=pos+quat)
+        coarse_dim:       int = 3,    # dims per coarse lookahead step
+        robot_state_dim:  int = 30,   # robot state block size (30=pos-only, 40=6-DoF)
         # ── ablation flags ──
-        use_pos_embed:    bool = True,   # ablation A: learned PE vs no PE
-        use_cross_attn:   bool = True,   # ablation B: cross-attn vs plain concat
-        pair_tokens:      bool = True,   # ablation C: paired (fine[i],cmd[i]) vs unpaired
+        use_pos_embed:    bool = True,
+        use_cross_attn:   bool = True,
+        pair_tokens:      bool = True,
         # ── v2 architecture flags ──
-        mlp_proj:         bool = False,  # v2 D: MLP (LN+GELU) projections vs single Linear
-        use_reactive:     bool = False,  # v2 E: bypass robot_state → latent (fast reactive path)
-        attn_pool:        bool = False,  # v2 F: attention-weighted slot pooling vs mean
+        mlp_proj:         bool = False,
+        use_reactive:     bool = False,
+        attn_pool:        bool = False,
     ) -> None:
         super().__init__()
 
-        self.n_fine   = n_fine
-        self.n_coarse = n_coarse
-        self.n_cmd    = n_cmd
-        self.d_model  = d_model
-        self.use_pos_embed  = use_pos_embed
-        self.use_cross_attn = use_cross_attn
-        self.pair_tokens    = pair_tokens
-        self.mlp_proj       = mlp_proj
-        self.use_reactive   = use_reactive
-        self.attn_pool      = attn_pool
+        self.n_fine          = n_fine
+        self.n_coarse        = n_coarse
+        self.n_cmd           = n_cmd
+        self.d_model         = d_model
+        self.fine_dim        = fine_dim
+        self.coarse_dim      = coarse_dim
+        self.robot_state_dim = robot_state_dim
+        self.use_pos_embed   = use_pos_embed
+        self.use_cross_attn  = use_cross_attn
+        self.pair_tokens     = pair_tokens
+        self.mlp_proj        = mlp_proj
+        self.use_reactive    = use_reactive
+        self.attn_pool       = attn_pool
 
-        # Infer traj_onehot size from feature_dim (pool size = len(trajectory_pool))
-        self.n_pool = feature_dim - N_ROBOT_STATE - n_fine * 3 - n_coarse * 3 - n_cmd * 7
+        # Infer traj_onehot size from feature_dim
+        self.n_pool = (feature_dim
+                       - robot_state_dim
+                       - n_fine   * fine_dim
+                       - n_coarse * coarse_dim
+                       - n_cmd    * self.CMD_DIM)
 
         if self.n_pool < 0:
             raise ValueError(
-                f"feature_dim={feature_dim} too small for n_fine={n_fine}, "
-                f"n_coarse={n_coarse}, n_cmd={n_cmd}: computed n_pool={self.n_pool}"
+                f"feature_dim={feature_dim} too small: "
+                f"robot_state_dim={robot_state_dim}, n_fine={n_fine}×{fine_dim}, "
+                f"n_coarse={n_coarse}×{coarse_dim}, n_cmd={n_cmd}×7 "
+                f"→ computed n_pool={self.n_pool}"
             )
 
-        state_in = N_ROBOT_STATE + n_coarse * 3 + self.n_pool  # 30+12+3 = 45
+        state_in = robot_state_dim + n_coarse * coarse_dim + self.n_pool
         self.state_proj = make_proj(state_in, d_model, mlp_proj)
 
         if pair_tokens:
-            # ── Ablation C=ON (default): concat fine[i]+cmd[i] → 1 token per slot ──
-            slot_in = self.FINE_DIM + self.CMD_DIM       # 3+7 = 10
+            # concat fine[i] + cmd[i] → 1 slot token per delay step
+            # Position-only: 3+7=10D  |  6-DoF: 7+7=14D
+            slot_in = fine_dim + self.CMD_DIM
             self.slot_proj = make_proj(slot_in, d_model, mlp_proj)
             n_tokens = min(n_fine, n_cmd)
         else:
-            # ── Ablation C=OFF: fine and cmd encoded independently → 2 tokens/slot ──
-            self.fine_proj = make_proj(self.FINE_DIM, d_model, mlp_proj)
-            self.cmd_proj  = make_proj(self.CMD_DIM,  d_model, mlp_proj)
-            n_tokens = n_fine + n_cmd   # 10 tokens total
+            # fine and cmd encoded as separate tokens
+            self.fine_proj = make_proj(fine_dim,        d_model, mlp_proj)
+            self.cmd_proj  = make_proj(self.CMD_DIM,    d_model, mlp_proj)
+            n_tokens = n_fine + n_cmd
 
         # ── Ablation A: learned positional embedding ──
         if use_pos_embed:
@@ -257,17 +280,22 @@ class DelayTransformerExtractor(nn.Module):
         self.latent_dim = d_model * n_paths
 
     def _split_obs(self, obs: torch.Tensor):
-        """Correctly split flat obs into segments using known obs layout.
+        """Split flat obs into segments using the configured obs layout.
 
-        Layout: [robot_state(30) | fine(n_fine×3) | coarse(n_coarse×3) | cmd(n_cmd×7) | traj_onehot(n_pool)]
+        Position-only layout (fine_dim=3, coarse_dim=3, robot_state_dim=30):
+            [robot_state(30) | fine(n_fine×3) | coarse(n_coarse×3) | cmd(n_cmd×7) | traj_onehot]
+
+        6-DoF layout (fine_dim=7, coarse_dim=7, robot_state_dim=40):
+            [robot_state(40) | fine(n_fine×7) | coarse(n_coarse×7) | cmd(n_cmd×7) | traj_onehot]
         """
         B = obs.shape[0]
         idx = 0
 
-        robot  = obs[:, idx : idx + N_ROBOT_STATE];                      idx += N_ROBOT_STATE
-        fine   = obs[:, idx : idx + self.n_fine   * 3].view(B, self.n_fine,   3); idx += self.n_fine   * 3
-        coarse = obs[:, idx : idx + self.n_coarse * 3].view(B, self.n_coarse, 3); idx += self.n_coarse * 3
-        cmd    = obs[:, idx : idx + self.n_cmd    * 7].view(B, self.n_cmd,    7); idx += self.n_cmd    * 7
+        rs = self.robot_state_dim
+        robot  = obs[:, idx : idx + rs];                                                   idx += rs
+        fine   = obs[:, idx : idx + self.n_fine   * self.fine_dim  ].view(B, self.n_fine,   self.fine_dim  ); idx += self.n_fine   * self.fine_dim
+        coarse = obs[:, idx : idx + self.n_coarse * self.coarse_dim].view(B, self.n_coarse, self.coarse_dim); idx += self.n_coarse * self.coarse_dim
+        cmd    = obs[:, idx : idx + self.n_cmd    * self.CMD_DIM   ].view(B, self.n_cmd,    self.CMD_DIM   ); idx += self.n_cmd    * self.CMD_DIM
         traj   = obs[:, idx : idx + self.n_pool]
 
         return robot, fine, coarse, cmd, traj
@@ -332,25 +360,29 @@ class _SplitExtractor(nn.Module):
 
     def __init__(
         self,
-        feature_dim:    int,
-        actor_arch:     List[int],
-        critic_arch:    List[int],
-        n_fine:         int = 5,
-        n_coarse:       int = 4,
-        n_cmd:          int = 5,
-        d_model:        int = 64,
-        nhead:          int = 4,
-        n_enc_layers:   int = 2,
-        n_xattn_layers: int = 1,
+        feature_dim:     int,
+        actor_arch:      List[int],
+        critic_arch:     List[int],
+        n_fine:          int = 5,
+        n_coarse:        int = 4,
+        n_cmd:           int = 5,
+        d_model:         int = 64,
+        nhead:           int = 4,
+        n_enc_layers:    int = 2,
+        n_xattn_layers:  int = 1,
+        # obs layout dims (pass 7/7/40 for 6-DoF)
+        fine_dim:        int = 3,
+        coarse_dim:      int = 3,
+        robot_state_dim: int = 30,
         # ablation flags (forwarded to DelayTransformerExtractor)
-        use_pos_embed:  bool = True,
-        use_cross_attn: bool = True,
-        pair_tokens:    bool = True,
+        use_pos_embed:   bool = True,
+        use_cross_attn:  bool = True,
+        pair_tokens:     bool = True,
         # v2 architecture flags
-        ffn_mult:       int  = 2,
-        mlp_proj:       bool = False,
-        use_reactive:   bool = False,
-        attn_pool:      bool = False,
+        ffn_mult:        int  = 2,
+        mlp_proj:        bool = False,
+        use_reactive:    bool = False,
+        attn_pool:       bool = False,
     ) -> None:
         super().__init__()
 
@@ -361,6 +393,9 @@ class _SplitExtractor(nn.Module):
             n_enc_layers=n_enc_layers,
             n_xattn_layers=n_xattn_layers,
             ffn_mult=ffn_mult,
+            fine_dim=fine_dim,
+            coarse_dim=coarse_dim,
+            robot_state_dim=robot_state_dim,
             use_pos_embed=use_pos_embed,
             use_cross_attn=use_cross_attn,
             pair_tokens=pair_tokens,
@@ -405,22 +440,26 @@ class DelayTransformerPolicy(ActorCriticPolicy):
 
         self.mlp_extractor = _SplitExtractor(
             self.features_dim,
-            actor_arch    = list(kw.get("actor_arch",    [128, 128])),
-            critic_arch   = list(kw.get("critic_arch",   [128, 128, 128])),
-            n_fine        = int(kw.get("n_fine",           5)),
-            n_coarse      = int(kw.get("n_coarse",          4)),
-            n_cmd         = int(kw.get("n_cmd",             5)),
-            d_model       = int(kw.get("d_model",          64)),
-            nhead         = int(kw.get("nhead",             4)),
-            n_enc_layers  = int(kw.get("n_enc_layers",      2)),
-            n_xattn_layers= int(kw.get("n_xattn_layers",   1)),
-            use_pos_embed = bool(kw.get("use_pos_embed",  True)),
-            use_cross_attn= bool(kw.get("use_cross_attn", True)),
-            pair_tokens   = bool(kw.get("pair_tokens",    True)),
-            ffn_mult      = int(kw.get("ffn_mult",         2)),
-            mlp_proj      = bool(kw.get("mlp_proj",      False)),
-            use_reactive  = bool(kw.get("use_reactive",  False)),
-            attn_pool     = bool(kw.get("attn_pool",     False)),
+            actor_arch      = list(kw.get("actor_arch",      [128, 128])),
+            critic_arch     = list(kw.get("critic_arch",     [128, 128, 128])),
+            n_fine          = int(kw.get("n_fine",           5)),
+            n_coarse        = int(kw.get("n_coarse",         4)),
+            n_cmd           = int(kw.get("n_cmd",            5)),
+            d_model         = int(kw.get("d_model",          64)),
+            nhead           = int(kw.get("nhead",            4)),
+            n_enc_layers    = int(kw.get("n_enc_layers",     2)),
+            n_xattn_layers  = int(kw.get("n_xattn_layers",  1)),
+            # obs layout dims — 6-DoF sets these to 7/7/40
+            fine_dim        = int(kw.get("fine_dim",         3)),
+            coarse_dim      = int(kw.get("coarse_dim",       3)),
+            robot_state_dim = int(kw.get("robot_state_dim",  30)),
+            use_pos_embed   = bool(kw.get("use_pos_embed",   True)),
+            use_cross_attn  = bool(kw.get("use_cross_attn",  True)),
+            pair_tokens     = bool(kw.get("pair_tokens",     True)),
+            ffn_mult        = int(kw.get("ffn_mult",         2)),
+            mlp_proj        = bool(kw.get("mlp_proj",        False)),
+            use_reactive    = bool(kw.get("use_reactive",    False)),
+            attn_pool       = bool(kw.get("attn_pool",       False)),
         )
 
 

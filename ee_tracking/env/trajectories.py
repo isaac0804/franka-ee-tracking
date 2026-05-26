@@ -757,7 +757,11 @@ def make(name: str, **kwargs) -> Trajectory:
         return RotatingGrasp(**kwargs)
     if name in ("random_walk_6dof", "rw6dof"):
         return RandomWalk6DoF(**kwargs)
-    # UprightConstraint wraps another trajectory; use make_upright() helper
+    if name in ("upright_constraint", "upright"):
+        # kwargs are forwarded to the inner position trajectory.
+        # Pass `inner="circle"` (default) to choose which trajectory to wrap.
+        inner_name = kwargs.pop("inner", "circle")
+        return UprightConstraint(make(inner_name, **kwargs))
     raise ValueError(f"unknown trajectory: {name}")
 
 
