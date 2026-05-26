@@ -1,0 +1,49 @@
+# Task 4 — Rotating Grasp (pure orientation, fixed position)
+# OOD evaluation task: not in training pool.
+# Train with only rotating_grasp to build orientation baselines.
+
+env:
+  env_class: FrankaTracking6DoFEnv
+  trajectory_pool: ["rotating_grasp"]
+  episode_seconds: 12.0
+  residual_scale: 0.12
+
+  w_pos: 2.0                            # position is easy (hold), reduce weight
+  w_ori: 5.0                            # orientation is the primary challenge
+  w_vel: 0.05
+  w_residual: 0.05
+
+  kp_ori: 3.0
+  disturbance:
+    cmd_delay: 5
+
+  lookahead_horizon: 5
+  lookahead_dt: 0.02
+  lookahead_coarse_horizon: 4
+  lookahead_coarse_dt: 0.10
+  ramp_in_seconds: 0.5
+
+ppo:
+  n_envs: 20
+  n_steps: 512
+  batch_size: 1024
+  n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.005
+  learning_rate: 1.0e-3
+  lr_schedule: cosine
+  lr_end: 1.0e-4
+
+policy:
+  type: transformer_no_xattn
+  d_model: 64
+  nhead: 4
+  num_encoder_layers: 2
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256, 256]
+
+training:
+  total_timesteps: 5_000_000
+  seed: 42

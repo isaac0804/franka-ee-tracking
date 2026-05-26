@@ -1,0 +1,65 @@
+# Base config for 6-DoF orientation tracking
+# Architecture: Transformer (no cross-attention), paired slot tokens (14-D each)
+# Obs: 141-D  |  Action: 7-D joint residuals
+
+env:
+  env_class: FrankaTracking6DoFEnv       # tells train.py to use the 6-DoF env
+  trajectory_pool: ["tilted_circle", "look_at", "random_walk_6dof"]
+  episode_seconds: 8.0
+  residual_scale: 0.12                   # same as position-only champion
+  use_residual: true
+
+  # ── reward ────────────────────────────────────────────────────────────
+  w_pos: 5.0
+  w_ori: 2.0                             # orientation progress weight
+  w_vel: 0.1
+  w_residual: 0.05
+  w_jerk: 0.0
+  w_smooth: 0.0
+
+  # ── IK ────────────────────────────────────────────────────────────────
+  kp_ori: 3.0                            # orientation proportional gain
+
+  # ── delay ─────────────────────────────────────────────────────────────
+  disturbance:
+    cmd_delay: 5                         # 5-step (100 ms) whole-pipeline delay
+    obs_noise_pos: 0.005                 # 5 mm EE position noise
+    obs_noise_joints: 0.002              # 2 mm joint position noise
+
+  # ── lookahead ─────────────────────────────────────────────────────────
+  lookahead_horizon: 5
+  lookahead_dt: 0.02
+  lookahead_coarse_horizon: 4
+  lookahead_coarse_dt: 0.10
+
+  # ── ramp-in ───────────────────────────────────────────────────────────
+  ramp_in_seconds: 0.5
+
+ppo:
+  n_envs: 20
+  n_steps: 512
+  batch_size: 1024
+  n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.005
+  vf_coef: 0.5
+  max_grad_norm: 1.0
+  learning_rate: 1.0e-3
+  lr_schedule: cosine
+  lr_end: 1.0e-4
+
+policy:
+  type: transformer_no_xattn            # same architecture, wider slots (14-D → d_model=64)
+  d_model: 64
+  nhead: 4
+  num_encoder_layers: 2
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256, 256]
+
+training:
+  total_timesteps: 5_000_000
+  seed: 42
+  eval_freq: 50_000
+  n_eval_episodes: 5

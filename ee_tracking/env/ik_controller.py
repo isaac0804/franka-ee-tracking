@@ -6,6 +6,18 @@ target position with a feed-forward term from the desired EE velocity.
 The damping factor keeps the controller well-behaved near singularities
 and outside the reachable workspace (it just slows down, instead of
 diverging). This is the "baseline" the residual RL policy improves upon.
+
+6-DoF extension
+---------------
+`DLS6DoFController` subclasses `DLSController` to also command orientation.
+It uses the full 6×7 Jacobian (translational + rotational) and a separate
+orientation gain `kp_ori`.  The 6-D task-space velocity is:
+
+    v_des = [kp_pos * e_pos + v_pos_ff,
+             kp_ori * e_ori + v_ori_ff]    # e_ori is the 3-D axis-angle error
+
+The DLS solve is identical in structure, just larger:
+    q_dot = J^T (J J^T + λ²I₆)^{-1} v_des   (J is 6×7)
 """
 
 from __future__ import annotations
@@ -75,4 +87,87 @@ class DLSController:
         lam2 = self.damping ** 2
         A = J @ J.T + lam2 * np.eye(3)
         q_dot = J.T @ np.linalg.solve(A, v_des)
+        return np.clip(q_dot, -self.max_jntvel, self.max_jntvel)
+
+
+# ---------------------------------------------------------------------------
+# 6-DoF DLS controller (position + orientation)
+# ---------------------------------------------------------------------------
+
+class DLS6DoFController(DLSController):
+    """Damped least-squares IK with full 6-DoF (position + orientation) control.
+
+    Extends `DLSController` to use the combined 6×7 Jacobian (translational
+    rows stacked above rotational rows) and a separate orientation gain.
+
+    Args:
+        kp_ori:   proportional gain on orientation error (rad/s per rad).
+                  Smaller than kp_pos is usually better: orientation errors
+                  converge more slowly due to larger inertia in distal joints.
+        *args, **kwargs: forwarded to `DLSController`.
+    """
+
+    def __init__(self, *args, kp_ori: float = 3.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.kp_ori = float(kp_ori)
+        # Additional scratch buffer for rotational Jacobian (reused in __init__)
+        # _jacp and _jacr already allocated by DLSController.__init__
+
+    def jacobian6d(self, data: mujoco.MjData) -> np.ndarray:
+        """6×7 Jacobian: translational rows stacked above rotational rows."""
+        mujoco.mj_jacBody(self.model, data, self._jacp, self._jacr, self.ee_id)
+        J_pos = self._jacp[:, self.arm_dof]   # (3, 7)
+        J_rot = self._jacr[:, self.arm_dof]   # (3, 7)
+        return np.vstack([J_pos, J_rot])       # (6, 7)
+
+    def ee_quat(self, data: mujoco.MjData) -> np.ndarray:
+        """Current EE orientation as (w, x, y, z) unit quaternion."""
+        # MuJoCo stores xquat as (w, x, y, z) — same convention we use throughout
+        return data.xquat[self.ee_id].copy()
+
+    def compute6d(
+        self,
+        data: mujoco.MjData,
+        target_pos: np.ndarray,
+        target_vel: np.ndarray | None = None,
+        target_quat: np.ndarray | None = None,
+        target_angvel: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Return 7 joint velocities (rad/s) for full 6-DoF tracking.
+
+        Args:
+            target_pos:   desired EE position (3D).
+            target_vel:   desired EE translational velocity (3D, optional).
+            target_quat:  desired EE orientation as (w,x,y,z) quaternion.
+                          If None, falls back to position-only IK.
+            target_angvel: desired EE angular velocity (3D, optional).
+        """
+        from .trajectories import quat_error   # lazy import to avoid circularity
+
+        if target_vel is None:
+            target_vel = np.zeros(3)
+
+        # --- Position task ---
+        p_cur = self.ee_pos(data)
+        e_pos = target_pos - p_cur
+        v_pos = target_vel + self.kp * e_pos
+
+        if target_quat is None:
+            # Fallback: position-only (3×7 Jacobian, same as base class)
+            return self.compute(data, target_pos, target_vel)
+
+        # --- Orientation task ---
+        if target_angvel is None:
+            target_angvel = np.zeros(3)
+
+        q_cur = self.ee_quat(data)
+        e_ori = quat_error(target_quat, q_cur)           # 3-D axis-angle error
+        v_ori = target_angvel + self.kp_ori * e_ori
+
+        # --- Combined 6-D DLS solve ---
+        v_des = np.concatenate([v_pos, v_ori])            # (6,)
+        J     = self.jacobian6d(data)                     # (6, 7)
+        lam2  = self.damping ** 2
+        A     = J @ J.T + lam2 * np.eye(6)               # (6, 6)
+        q_dot = J.T @ np.linalg.solve(A, v_des)          # (7,)
         return np.clip(q_dot, -self.max_jntvel, self.max_jntvel)
