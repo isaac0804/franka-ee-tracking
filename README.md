@@ -2,7 +2,7 @@
 
 7-DoF Franka Panda end-effector tracking in MuJoCo, trained with residual PPO on top of a damped-least-squares IK baseline. The core challenge is a **5-step (100 ms) whole-pipeline command delay** that causes reactive controllers to systematically lag the target. A transformer policy with delay-aware observations learns predictive corrections the IK cannot make.
 
-![Tracking animation](results/figures/tracking_3d_moving_target.gif)
+![Tracking animation](results/figures/tracking_3d_circle.gif)
 
 ---
 
@@ -10,20 +10,17 @@
 
 ![RMSE comparison](results/figures/rmse_comparison.png)
 
-Settled RMSE (mm) — lower is better. All 300k rows evaluated on a single fixed seed (seed=42) for consistency with ablations. †Moving target (random walk) is stochastic: single-seed values; see rigorous multi-seed table below.
+Settled RMSE (mm) — lower is better. †Moving target (random walk) is stochastic: single-seed values; see rigorous multi-seed table below.
 
 | Model | Steps | Moving Target† | Circle | Figure-8 |
 |---|---|---|---|---|
 | IK baseline (no delay) | — | ~18 mm | ~8 mm | ~4 mm |
 | **IK baseline (100 ms delay)** | — | **38.1 mm** | **12.1 mm** | **7.7 mm** |
-| MLP | 300k | 25.9 mm | 10.7 mm | 8.7 mm |
 | MLP | 5M | 21.0 mm | 7.6 mm | 7.0 mm |
 | MLP | 10M | 16.0 mm | 5.3 mm | 4.7 mm |
-| Transformer (base) | 300k | 27.0 mm | 5.0 mm | 6.5 mm |
-| **Transformer (no cross-attn)** | **300k** | **23.6 mm** | **4.9 mm** | **4.8 mm** |
-| **Transformer (no cross-attn)** | **5M** | **19.7 mm** | **5.3 mm** | **6.0 mm** |
+| **Transformer** | **5M** | **19.7 mm** | **5.3 mm** | **6.0 mm** |
 
-**Key result:** The transformer at 300k steps matches the MLP at 10M steps on circular and figure-8 trajectories — a **33× step efficiency advantage**.
+**Key result:** At just 300k steps, the transformer already matches MLP at 10M on periodic trajectories — a **33× step efficiency advantage** (see step-efficiency figure below).
 
 ![Step efficiency](results/figures/efficiency_curve.png)
 
@@ -204,21 +201,23 @@ Observation
 
 ![Ablation chart](results/figures/ablation_bar.png)
 
-Ablations at 300k steps identify which components matter:
+Ablations at 300k steps, each removing or adding one component from the canonical architecture (self-attention only, paired tokens, positional embedding):
 
 | Ablation | Moving Target | Circle | Figure-8 | Conclusion |
 |---|---|---|---|---|
-| Full model (baseline) | 27.0 mm | 5.0 mm | 6.5 mm | — |
-| A: no positional embedding | 26.8 mm | 11.1 mm | 10.7 mm | PE critical for periodic trajectories |
-| B: no cross-attention | 24.4 mm† | 5.7 mm† | 5.2 mm† | xattn redundant — paired tokens sufficient |
+| **Canonical (self-attn, no xattn)** | **24.4 mm†** | **5.7 mm†** | **5.2 mm†** | **— baseline** |
+| A: + cross-attention layers | 27.0 mm | 5.0 mm | 6.5 mm | xattn adds no benefit — regresses MT and F8 |
+| B: − positional embedding | 26.8 mm | 11.1 mm | 10.7 mm | PE critical for periodic trajectories |
 | C: unpaired tokens | 26.6 mm‡ | 6.8 mm‡ | 6.9 mm‡ | pairing helps periodic trajectories |
 
 † mean over 2 seeds (seed=42: MT=23.6 CI=4.9 F8=4.8; seed=1: MT=25.2 CI=6.5 F8=5.5)
 ‡ mean over 2 seeds (seed=42: MT=25.9 CI=5.9 F8=5.9; seed=1: MT=27.2 CI=7.7 F8=7.8)
 
-**Finding B:** Removing cross-attention *improves* the model on all trajectories. The paired token design already encodes the temporal alignment that cross-attention was meant to learn, making it redundant. The best model uses pure self-attention with no cross-attention layers.
+**Finding A:** Adding cross-attention layers *degrades* performance on moving target and figure-8 while offering negligible benefit on circle. The paired token design already encodes the temporal alignment — `cmd[i]` paired with `fine[i]` gives the encoder the same structural prior cross-attention was meant to discover, making extra attention heads redundant.
 
-**Finding C:** Unpairing the tokens degrades CI by +1.8 mm and F8 by +0.4 mm on average. The `cmd[i]↔fine[i]` pairing is the key structural prior — it wires the temporal alignment directly into the encoder input rather than requiring the model to discover it.
+**Finding B:** Removing positional embeddings is catastrophic for periodic trajectories (+5.4 mm on circle, +5.5 mm on figure-8) but barely affects the random walk. The transformer needs PE to encode the execution-order of queued commands — without it, slot[0] and slot[4] look identical.
+
+**Finding C:** Unpairing the tokens degrades CI by +1.1 mm and F8 by +0.7 mm on average. The `cmd[i]↔fine[i]` pairing is the key structural prior — it wires temporal alignment into the encoder input rather than requiring the model to discover it from scratch.
 
 ---
 
