@@ -36,7 +36,7 @@ MODELS = {
         ],
     },
     "transformer": {
-        "label": "Transformer\n(no cross-attn)",
+        "label": "Transformer",
         "color": "#e05252",
         "indist_eval_dirs": [
             "results/eval/tfm_5M_s42_multi",

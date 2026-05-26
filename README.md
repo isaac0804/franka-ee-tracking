@@ -8,9 +8,9 @@
 
 ## Results
 
-![RMSE comparison](results/figures/rmse_comparison.png)
+![RMSE comparison](results/figures/comparison_5M_bars.png)
 
-Settled RMSE (mm) — lower is better. †Moving target (random walk) is stochastic: single-seed values; see rigorous multi-seed table below.
+Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution trajectories never seen during training. Error bars: ±std for stochastic tasks (MT 10 seeds, Step 5 seeds); inter-seed range for deterministic. †=1 seed.
 
 | Model | Steps | Moving Target† | Circle | Figure-8 |
 |---|---|---|---|---|
