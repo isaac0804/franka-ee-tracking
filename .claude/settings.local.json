@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git init *)",
-      "Bash(git add *)",
-      "Bash(git commit -m 'Clean slate: keep env + IK baseline only *)"
-    ]
-  }
-}
