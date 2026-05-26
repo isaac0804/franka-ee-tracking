@@ -105,7 +105,9 @@ The full architecture:
 
 ```
 Observation
-    ├── robot_state (30D) ──────────────────────────────► Linear → state_enc (64D)
+    ├── robot_state (30D) ─┐
+    ├── coarse_look (12D)  ├─ concat (45D) ──► Linear → state_enc (64D)
+    ├── traj_onehot  (3D) ─┘
     └── [fine[i] ‖ cmd[i]] × 5 ──► TransformerEncoder ──► mean pool → slots_enc (64D)
                                                                         │
                                               concat(state_enc, slots_enc) (128D)
