@@ -135,7 +135,7 @@ def save_cache(cache_path: Path, data: dict):
 
 # ── IK baseline (deterministic, run once) ─────────────────────────────────────
 
-IK_MM = {"circle": 12.1, "figure8": 7.7}   # from existing eval
+IK_MM = {"circle": 11.5, "figure8": 7.7}   # 100ms delay IK, consistent with comparison_5M_bars
 
 
 # ── figure ────────────────────────────────────────────────────────────────────
