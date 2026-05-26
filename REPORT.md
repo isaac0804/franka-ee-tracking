@@ -202,12 +202,12 @@ Transformer produces 20–45% smoother joint commands across all trajectories. T
 
 Evaluated on square and rectangle paths — **never seen during training** (traj-type one-hot is all-zeros at inference):
 
-| Trajectory | IK | MLP 5M (best seed) | **Transformer 5M** |
+| Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
 |---|---|---|---|
-| Square | 10.6 mm | 6.8 mm | **4.9 mm** |
-| Rectangle | 9.4 mm | 7.1 mm | **4.8 mm** |
+| Square | 10.4 mm | 7.5 mm | **4.0 mm** |
+| Rectangle | 10.9 mm | 8.6 mm | **5.4 mm** |
 
-Transformer generalizes ~30% better than the best MLP seed on OOD shapes. The paired-slot structure learns general "what is queued vs what is needed" reasoning rather than memorizing sinusoidal patterns.
+Transformer is **47% better than MLP on square, 37% on rectangle**. Hard 90° corners are exactly where the delay matters most: the policy's fine lookahead sees the corner 100ms ahead and pre-steers; the IK and MLP react late. The paired-slot structure's general "what is queued vs what is needed" reasoning transfers to OOD shapes; the MLP must rely on pattern memorization.
 
 ---
 

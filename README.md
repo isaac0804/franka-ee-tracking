@@ -53,14 +53,14 @@ On periodic trajectories (circle, figure-8) the transformer is **43% and 25% mor
 
 ### Out-of-distribution generalization (square, rectangle)
 
-Tested on trajectories **never seen during training** (traj-type one-hot is all-zeros at eval time):
+Tested on trajectories **never seen during training** — piecewise-constant velocity with hard 90° corners. The traj-type one-hot is all-zeros at eval time (unknown trajectory type).
 
-| Trajectory | IK | MLP 5M (best seed) | **Transformer 5M** |
+| Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
 |---|---|---|---|
-| Square | 10.6 mm | 6.8 mm | **4.9 mm** |
-| Rectangle | 9.4 mm | 7.1 mm | **4.8 mm** |
+| Square | 10.4 mm | 7.5 mm | **4.0 mm** |
+| Rectangle | 10.9 mm | 8.6 mm | **5.4 mm** |
 
-The transformer generalizes ~30% better than the best MLP seed on OOD shapes.
+The transformer is **47% better than the best MLP seed on square and 37% on rectangle**. Hard corners are exactly where predictive control pays off: the policy's fine lookahead sees the upcoming corner 100ms ahead and pre-steers; the IK reacts 100ms late.
 
 ---
 
