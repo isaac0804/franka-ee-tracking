@@ -67,7 +67,19 @@ python scripts/make_figures.py \
     --tfm "$OUT/final_model.zip" \
     --out "$OUT/figures"
 
+# ── Animations ───────────────────────────────────────────────────────────────
 echo ""
-echo "Done. Model: $OUT/final_model.zip"
-echo "Eval:        $OUT/eval/ablation.json"
-echo "Figures:     $OUT/figures/"
+echo "── Animations ──────────────────────────────────────"
+python scripts/make_animation.py \
+    --model "$OUT/final_model.zip" \
+    --all \
+    --out "$OUT/figures"
+
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "Done."
+echo "  Model:      $OUT/final_model.zip"
+echo "  Eval:       $OUT/eval/ablation.json"
+echo "  Figures:    $OUT/figures/"
+echo "  Animations: $OUT/figures/tracking_3d_*.gif"
+echo "════════════════════════════════════════════════════"
