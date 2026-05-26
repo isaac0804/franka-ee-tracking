@@ -29,7 +29,7 @@ import ee_tracking.policies.transformer_policy  # noqa: F401 — registers trans
 
 ALL_TRAJECTORIES = ["moving_target", "circle", "figure8", "unreachable"]
 # OOD trajectories: never seen during training; one-hot is all-zeros at eval time.
-OOD_TRAJECTORIES = ["square", "rectangle"]
+OOD_TRAJECTORIES = ["square", "rectangle", "step_target", "fast_circle"]
 
 # Fallback disturbance when no saved config is available.
 _DEFAULT_DISTURBANCE = DisturbanceConfig(obs_pos_noise=0.005, obs_jnt_noise=0.002, cmd_delay=5)

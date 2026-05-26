@@ -543,4 +543,19 @@ class FrankaTrackingEnv(gym.Env):
                 "height": float(self._rng.uniform(0.08, 0.12)),
                 "period": float(self._rng.uniform(8.0, 12.0)),
             }
+        if name in ("step_target", "step"):
+            return {
+                "center":       home_ee,
+                "reach":        float(self._rng.uniform(0.08, 0.14)),
+                "dwell_seconds": float(self._rng.uniform(0.8, 1.2)),
+                "n_waypoints":  int(np.ceil(self.cfg.episode_seconds /
+                                            self._rng.uniform(0.8, 1.2))) + 2,
+                "seed":         int(self._rng.integers(0, 1 << 30)),
+            }
+        if name in ("fast_circle", "circle_fast"):
+            return {
+                "center": home_ee,
+                "radius": float(self._rng.uniform(0.08, 0.14)),
+                "period": float(self._rng.uniform(2.0, 4.0)),  # half of training 4–8 s
+            }
         return {}

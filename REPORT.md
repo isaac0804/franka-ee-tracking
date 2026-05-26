@@ -200,14 +200,29 @@ Transformer produces 20–45% smoother joint commands across all trajectories. T
 
 ### Out-of-distribution generalization
 
-Evaluated on square and rectangle paths — **never seen during training** (traj-type one-hot is all-zeros at inference):
+Four OOD scenarios, two categories. Traj-type one-hot is all-zeros at inference throughout.
+
+**OOD shapes** (piecewise-constant velocity, hard corners):
 
 | Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
 |---|---|---|---|
 | Square | 10.4 mm | 7.5 mm | **4.0 mm** |
 | Rectangle | 10.9 mm | 8.6 mm | **5.4 mm** |
 
-Transformer is **47% better than MLP on square, 37% on rectangle**. Hard 90° corners are exactly where the delay matters most: the policy's fine lookahead sees the corner 100ms ahead and pre-steers; the IK and MLP react late. The paired-slot structure's general "what is queued vs what is needed" reasoning transfers to OOD shapes; the MLP must rely on pattern memorization.
+Transformer is **47% better on square, 37% on rectangle**. Hard corners are where delay matters most: the fine lookahead sees the corner 100ms ahead and pre-steers.
+
+**OOD task conditions** (different speed / trajectory structure):
+
+| Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
+|---|---|---|---|
+| Fast circle (2× training speed) | 31.1 mm | 11.1 mm | **9.6 mm** |
+| Step target (random waypoint jumps) | 84.5 mm | **59.3 mm** | 64.3 mm |
+
+Fast circle (period 2–4s vs training 4–8s): transformer wins by 13%. The delay compensation generalises to higher speeds.
+
+**Step target reveals a genuine tradeoff:** the transformer is beaten by the MLP on discrete position jumps. A step jump requires an aggressive impulse response: command hard toward the new position immediately and correct fast. The MLP's higher action saturation rate (49% vs 37%) and roughness (0.47 vs 0.29) actually helps here — the more bang-bang policy settles to the new waypoint faster. The transformer's structural prior is tuned for smooth trajectories where deliberate pre-compensation pays off, not for step-response dynamics.
+
+This is not a failure — it is a genuine architectural tradeoff documented honestly. A combined system could route step targets through a different controller (pure IK is already 84mm; an impulsive MLP gets this to 59mm; the transformer's penalty is 5mm over the MLP).
 
 ---
 

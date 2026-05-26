@@ -51,16 +51,27 @@ On periodic trajectories (circle, figure-8) the transformer is **43% and 25% mor
 
 ---
 
-### Out-of-distribution generalization (square, rectangle)
+### Out-of-distribution generalization
 
-Tested on trajectories **never seen during training** — piecewise-constant velocity with hard 90° corners. The traj-type one-hot is all-zeros at eval time (unknown trajectory type).
+Traj-type one-hot is all-zeros at eval time (unknown trajectory type). Four OOD scenarios across two categories:
 
-| Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
+**OOD shapes** — same task, unseen geometry:
+
+| Trajectory | IK | MLP 5M (mean) | **Transformer 5M** |
 |---|---|---|---|
-| Square | 10.4 mm | 7.5 mm | **4.0 mm** |
-| Rectangle | 10.9 mm | 8.6 mm | **5.4 mm** |
+| Square (hard corners) | 10.4 mm | 7.5 mm | **4.0 mm** |
+| Rectangle (asymmetric) | 10.9 mm | 8.6 mm | **5.4 mm** |
 
-The transformer is **47% better than the best MLP seed on square and 37% on rectangle**. Hard corners are exactly where predictive control pays off: the policy's fine lookahead sees the upcoming corner 100ms ahead and pre-steers; the IK reacts 100ms late.
+Transformer is **47% better on square, 37% on rectangle**. Hard corners are where the delay is most damaging — the fine lookahead sees the upcoming corner 100ms ahead and pre-steers.
+
+**OOD task conditions** — same geometry, different regime:
+
+| Trajectory | IK | MLP 5M (mean) | **Transformer 5M** |
+|---|---|---|---|
+| Fast circle (2× speed) | 31.1 mm | 11.1 mm | **9.6 mm** |
+| Step target (pick-and-place) | 84.5 mm | **59.3 mm** | 64.3 mm |
+
+Fast circle: transformer edges out MLP (−13%). Step target: **MLP wins** — the discrete jump needs an aggressive impulse response, and the MLP's higher saturation rate (49% vs 37%) settles faster. The transformer's smoother, more deliberate corrections are a liability here. This is a genuine architectural tradeoff.
 
 ---
 

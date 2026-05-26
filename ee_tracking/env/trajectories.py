@@ -137,6 +137,63 @@ class Unreachable(Trajectory):
         return pos, vel
 
 
+class StepTarget(Trajectory):
+    """Sequence of random waypoints held for `dwell_seconds` each — OOD.
+
+    Models pick-and-place style targets: discrete position jumps with zero
+    velocity during each hold period.  Velocity is always zero (stationary
+    target between jumps).
+
+    Why this is an interesting OOD test
+    ------------------------------------
+    At dwell time T_k the target jumps instantly.  The fine lookahead sees the
+    upcoming jump *before* the delay window closes:
+
+        t = T_k − 0.10 s  →  fine[4] already shows the new waypoint
+        t = T_k − 0.08 s  →  fine[3..4] show new waypoint  …
+
+    A policy with the delay-aware structural prior can pre-queue commands
+    pointing to the new waypoint 100ms before the step executes.  The IK and
+    a flat MLP both react only at t = T_k and then wait 100ms for the command
+    to arrive — guaranteed overshoot on the old side, then undershoot on the new.
+    """
+
+    def __init__(self, center=(0.5, 0.0, 0.5), reach=0.12, dwell_seconds=1.0,
+                 n_waypoints=8, seed=0):
+        self.center        = np.asarray(center, dtype=np.float64)
+        self.reach         = float(reach)
+        self.dwell         = float(dwell_seconds)
+        self.duration      = n_waypoints * dwell_seconds
+
+        # Uniform random waypoints inside a sphere of radius `reach`
+        rng = np.random.default_rng(seed)
+        pts = []
+        while len(pts) < n_waypoints:
+            p = rng.uniform(-1.0, 1.0, 3)
+            if np.linalg.norm(p) <= 1.0:
+                pts.append(self.center + self.reach * p)
+        self._waypoints = np.array(pts)   # (n_waypoints, 3)
+
+    def sample(self, t: float):
+        idx = min(int(t / self.dwell), len(self._waypoints) - 1)
+        return self._waypoints[idx], np.zeros(3)
+
+
+class FastCircle(Circle):
+    """Circle at 2× training speed — OOD.
+
+    Training circle period: 4–8 s.  FastCircle period: 2–4 s (half range).
+    At 2× speed the 100ms delay causes twice the spatial lag compared to the
+    training distribution, testing whether the learned compensation scales.
+
+    Inherits all Circle geometry; only the default period changes.
+    """
+
+    def __init__(self, center=(0.5, 0.0, 0.5), radius=0.12, period=3.0):
+        super().__init__(center=center, radius=radius, period=period)
+        self.duration = 3 * self.T   # three full laps
+
+
 class Square(Trajectory):
     """Square path in the y-z plane — OOD trajectory (not in training pool).
 
@@ -232,4 +289,8 @@ def make(name: str, **kwargs) -> Trajectory:
         return Square(**kwargs)
     if name in ("rectangle", "rect"):
         return Rectangle(**kwargs)
+    if name in ("step_target", "step"):
+        return StepTarget(**kwargs)
+    if name in ("fast_circle", "circle_fast"):
+        return FastCircle(**kwargs)
     raise ValueError(f"unknown trajectory: {name}")

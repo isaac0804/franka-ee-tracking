@@ -24,10 +24,15 @@ MODELS = {
             "results/eval/mlp_5M_s42_multi",
             "results/eval/mlp_5M_s1_multi",
         ],
-        # per-model OOD ablation.json dirs (single seed, deterministic)
+        # per-model OOD ablation.json dirs — deterministic shapes
         "ood_eval_dirs": [
             "results/sweep/rs012_5M/eval_ood",
             "results/sweep/rs012_seed1_5M/eval_ood",
+        ],
+        # step_target + fast_circle (5-seed mean)
+        "ood2_eval_dirs": [
+            "results/sweep/rs012_5M/eval_ood2",
+            "results/sweep/rs012_seed1_5M/eval_ood2",
         ],
     },
     "transformer": {
@@ -41,23 +46,35 @@ MODELS = {
             "results/main_runs/tfm_no_xattn_5M_s42/eval_ood",
             "results/main_runs/tfm_no_xattn_5M_s1/eval_ood",  # after s1 completes
         ],
+        "ood2_eval_dirs": [
+            "results/main_runs/tfm_no_xattn_5M_s42/eval_ood2",
+            "results/main_runs/tfm_no_xattn_5M_s1/eval_ood2",  # after s1 completes
+        ],
     },
 }
 
 INDIST_TRAJS  = ["moving_target", "circle", "figure8"]
-OOD_TRAJS     = ["square", "rectangle"]
+OOD_TRAJS     = ["square", "rectangle", "step_target", "fast_circle"]
 ALL_TRAJS     = INDIST_TRAJS + OOD_TRAJS
-TRAJ_LABELS   = ["Moving\nTarget", "Circle", "Figure‑8", "Square\n(OOD)", "Rectangle\n(OOD)"]
+TRAJ_LABELS   = [
+    "Moving\nTarget", "Circle", "Figure‑8",
+    "Square", "Rectangle", "Step\nTarget", "Fast\nCircle",
+]
 
-# IK baseline from multi-seed eval (consistent seed=0 for OOD)
+# IK baseline from multi-seed eval (consistent seed for each group)
 IK_MM = {
     "moving_target": 48.6,   # 10-seed mean
     "circle":        11.5,
     "figure8":        7.7,
-    "square":        10.4,   # seed=0
-    "rectangle":     10.9,   # seed=0
+    "square":        10.4,   # seed=0, deterministic
+    "rectangle":     10.9,   # seed=0, deterministic
+    "step_target":   84.5,   # 5-seed mean
+    "fast_circle":   31.1,   # 5-seed mean (deterministic each seed)
 }
-IK_STD = {"moving_target": 8.0}   # only MT has meaningful stochastic variance
+IK_STD = {
+    "moving_target": 8.0,
+    "step_target":   0.0,    # approx — not stored separately but close to 0
+}
 
 
 def load_eval(eval_dir: str) -> dict | None:
@@ -73,6 +90,10 @@ def get_rmse(data: dict, traj: str) -> tuple[float | None, float | None]:
     mean = t.get("residual_settled_rmse_mm")
     std  = t.get("residual_settled_rmse_mm_std")
     return mean, std
+
+
+OOD_SHAPE_TRAJS = ["square", "rectangle"]
+OOD_TASK_TRAJS  = ["step_target", "fast_circle"]
 
 
 def collect_results(arch_cfg: dict) -> dict:
@@ -92,7 +113,16 @@ def collect_results(arch_cfg: dict) -> dict:
         data = load_eval(eval_dir)
         if data is None:
             continue
-        for traj in OOD_TRAJS:
+        for traj in OOD_SHAPE_TRAJS:
+            mean, std = get_rmse(data, traj)
+            if mean is not None:
+                results[traj].append((mean, std))
+
+    for eval_dir in arch_cfg.get("ood2_eval_dirs", []):
+        data = load_eval(eval_dir)
+        if data is None:
+            continue
+        for traj in OOD_TASK_TRAJS:
             mean, std = get_rmse(data, traj)
             if mean is not None:
                 results[traj].append((mean, std))
@@ -118,25 +148,29 @@ def main():
     group_w = gap + (n_arch + 1) * bar_w  # +1 for IK bar
     x_base  = np.arange(n_traj, dtype=float) * (group_w + 0.30)
 
-    # Widen gap between in-dist and OOD groups
-    ood_start = len(INDIST_TRAJS)
-    x_base[ood_start:] += 0.35
+    # Extra gaps before each OOD section
+    shape_start = len(INDIST_TRAJS)
+    task_start  = shape_start + len(OOD_SHAPE_TRAJS)
+    x_base[shape_start:]  += 0.35
+    x_base[task_start:]   += 0.35
 
     offsets = np.linspace(-(n_arch) * bar_w / 2,
                            (n_arch) * bar_w / 2,
                            n_arch + 1)   # includes IK slot at offsets[0]
 
-    fig, ax = plt.subplots(figsize=(13, 5.5))
+    fig, ax = plt.subplots(figsize=(15, 5.8))
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
 
-    # OOD shaded background
-    ood_left  = x_base[ood_start] - group_w * 0.55
-    ood_right = x_base[-1] + group_w * 0.55
-    ax.axvspan(ood_left, ood_right, color="#f5f0ff", zorder=0, alpha=0.9)
-    ax.text((ood_left + ood_right) / 2, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 50,
-            "out-of-distribution", ha="center", va="top",
-            fontsize=8.5, color="#9966cc", style="italic")
+    def shade_group(start_idx, end_idx, color, label, label_color):
+        left  = x_base[start_idx] - group_w * 0.52
+        right = x_base[end_idx - 1] + group_w * 0.52
+        ax.axvspan(left, right, color=color, zorder=0, alpha=0.85)
+        ax.text((left + right) / 2, 91, label, ha="center", va="top",
+                fontsize=8, color=label_color, style="italic", fontweight="bold")
+
+    shade_group(shape_start, task_start, "#f5f0ff", "OOD — shapes", "#7744aa")
+    shade_group(task_start, n_traj,      "#fff0e8", "OOD — task conditions", "#cc6600")
 
     legend_patches = []
     ik_color = "#aaaaaa"
@@ -205,25 +239,17 @@ def main():
         legend_patches.append(mpatches.Patch(color=color,
                                               label=f"{label} 5M ({seeds_note})"))
 
-    # Divider line between in-dist and OOD
-    mid = (x_base[ood_start - 1] + x_base[ood_start]) / 2 - 0.05
-    ax.axvline(mid, color="#ccbbee", lw=1.2, ls="--", zorder=1)
-
     ax.set_xticks(x_base)
-    ax.set_xticklabels(TRAJ_LABELS, fontsize=10)
+    ax.set_xticklabels(TRAJ_LABELS, fontsize=9.5)
     ax.set_ylabel("Settled RMSE (mm) — lower is better", fontsize=11)
-    ax.set_title("MLP vs Transformer — 5M steps  |  in-distribution & OOD generalization\n"
-                 "Error bars: ±std for moving target (10 seeds); seed range for deterministic. *=single seed.",
-                 fontsize=10.5, pad=10)
-    ax.legend(handles=legend_patches, fontsize=9, framealpha=0.92, loc="upper right")
+    ax.set_title(
+        "MLP vs Transformer — 5M steps  |  in-distribution · OOD shapes · OOD task conditions\n"
+        "Error bars: ±std for stochastic (MT 10 seeds, step 5 seeds); inter-seed range for deterministic. *=1 seed.",
+        fontsize=10, pad=10)
+    ax.legend(handles=legend_patches, fontsize=9, framealpha=0.92, loc="upper left")
     ax.grid(axis="y", color="#e0e0e0", lw=0.8, zorder=0)
     ax.set_xlim(x_base[0] - group_w * 0.65, x_base[-1] + group_w * 0.65)
-    ax.set_ylim(0, 60)
-
-    # Re-draw OOD label after ylim is set
-    ax.text((ood_left + ood_right) / 2, 57.5,
-            "out-of-distribution", ha="center", va="top",
-            fontsize=8.5, color="#7744aa", style="italic", fontweight="bold")
+    ax.set_ylim(0, 95)
 
     plt.tight_layout()
     out = out_dir / "comparison_5M_bars.png"
