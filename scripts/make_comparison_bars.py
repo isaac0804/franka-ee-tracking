@@ -252,7 +252,7 @@ def main():
     ax.set_ylabel("Settled RMSE (mm) — lower is better", fontsize=11)
     ax.set_title(
         "MLP vs Transformer — 5M steps  |  in-distribution · OOD shapes · OOD task conditions\n"
-        "Error bars: ±SEM for stochastic (MT 10 seeds, step 30 seeds); inter-seed range for deterministic. *=1 seed.",
+        "Error bars: ±SEM for stochastic (MT 10 seeds, step 30 seeds); inter-seed range for deterministic.",
         fontsize=10, pad=10)
     ax.legend(handles=legend_patches, fontsize=9, framealpha=0.92, loc="upper left")
     ax.grid(axis="y", color="#e0e0e0", lw=0.8, zorder=0)
