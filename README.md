@@ -19,9 +19,9 @@ Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution t
 | MLP | 5M | 21.0 mm | 7.6 mm | 7.0 mm |
 | **Transformer** | **5M** | **19.7 mm** | **5.3 mm** | **6.0 mm** |
 
-**Key result:** At the same 5M training budget, the transformer is **30% more accurate** on circle (5.3 vs 7.6 mm) and **14% on figure-8** (6.0 vs 7.0 mm). The gap is consistent across the full training range — the transformer's inductive bias pays off at every scale, not just at convergence (see learning curve).
+**Key result:** At the same 5M training budget, the transformer is **30% more accurate** on circle (5.3 vs 7.6 mm) and **14% on figure-8** (6.0 vs 7.0 mm). The transformer also converges faster — consistently lower online tracking error throughout training.
 
-![Learning curve](results/figures/learning_curve.png)
+![Training curve](results/figures/training_curve.png)
 
 ---
 
