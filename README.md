@@ -12,7 +12,7 @@
 
 Settled RMSE (mm) — lower is better. Shaded regions mark out-of-distribution (OOD) trajectories never seen during training. Error bars: ±SEM.
 
-All results at 5M steps, 2-seed mean. Stochastic tasks (Moving Target: 10 seeds, Step Target: 30 seeds) show mean ± std. †OOD — never seen during training. ‡Roughness = mean |a_t − a_{t−1}| per joint, averaged across MT/CI/F8.
+All results at 5M steps, 2-seed mean. Stochastic tasks (Moving Target: 10 seeds, Step Target: 30 seeds) show mean ± std. †OOD — never seen during training. ‡Roughness = mean $|a_t - a_{t-1}|$ per joint, averaged across MT/CI/F8.
 
 | Model | Moving Target | Circle | Figure-8 | Square† | Rectangle† | Fast Circle† | Step Target† | Roughness‡ |
 |---|---|---|---|---|---|---|---|---|
@@ -72,10 +72,9 @@ tensorboard --logdir results/my_run/tb
 
 A standard IK controller reacts to the *current* target. With a 5-step (100 ms) FIFO delay the command only executes when the target has already moved — causing ~49 mm lag on a random walk, 2.5× the no-delay error. The fix: if the policy sees **where the target will be** when each queued command executes, and **what commands are already queued**, it can add a predictive residual that pre-compensates.
 
-```
-q_set(t) = clip(q_ik(t) + residual(t) × residual_scale, joint_limits)
-ctrl(t)  = q_set(t − 5)    ← whole pipeline delayed 5 steps
-```
+$$q_{\text{set}}(t) = \operatorname{clip}\!\left(q_{\text{ik}}(t) + r(t)\cdot s_r,\; q_{\text{lim}}\right)$$
+
+$$\text{ctrl}(t) = q_{\text{set}}(t - 5) \qquad \text{(whole pipeline delayed 5 steps)}$$
 
 A zero residual always falls back to IK. The 95-D observation is structured around the delay:
 
@@ -87,7 +86,9 @@ A zero residual always falls back to IK. The 95-D observation is structured arou
 | Command history | 35 | 5 queued setpoints − current q — prevents stacking redundant corrections |
 | Trajectory ID | 3 | One-hot: moving target / circle / figure-8 |
 
-Reward: `w_pos × (‖err_prev‖ − ‖err_now‖) − w_vel × ‖ee_vel‖ − w_residual × ‖action‖²`. No smoothness penalty — the optimal delay-compensation strategy is a predictive impulse, which is inherently discontinuous.
+$$r(t) = w_{\text{pos}}\bigl(\|e_{t-1}\| - \|e_t\|\bigr) - w_{\text{vel}}\|\dot{p}_{\text{ee}}\| - w_{\text{res}}\|a_t\|^2$$
+
+No smoothness penalty — the optimal delay-compensation strategy is a predictive impulse, which is inherently discontinuous.
 
 ---
 
@@ -97,9 +98,7 @@ Reward: `w_pos × (‖err_prev‖ − ‖err_now‖) − w_vel × ‖ee_vel‖ �
 
 The transformer processes the delay queue as a sequence of **slot tokens**, where each token pairs the queued command with the fine lookahead target it will execute against:
 
-```
-slot[i] = Linear(concat(fine_lookahead[i], cmd_history[i]))  →  d_model
-```
+$$\text{slot}_i = W\!\left[\text{fine}_i \;\|\; \text{cmd}_i\right] \in \mathbb{R}^{d_{\text{model}}}$$
 
 This pairing is the key structural prior. `cmd[i]` will execute when the target is at `fine[i]` — wiring this temporal alignment into the token representation gives the encoder a structure the MLP must discover from scratch.
 
