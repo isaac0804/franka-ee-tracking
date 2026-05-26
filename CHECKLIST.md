@@ -11,7 +11,7 @@
 - [x] Smoothness metrics table (action roughness + saturation rate)
 - [x] OOD evaluation: square, rectangle, fast circle, step target
 - [x] Scaling curves (1M / 2M / 3M / 5M checkpoints, both architectures)
-- [ ] Transformer seed=1 5M run — fill TBD rows once complete (~45 min remaining)
+- [x] Transformer seed=1 5M run — complete, evals done, TBD rows filled
 
 ---
 

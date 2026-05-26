@@ -173,19 +173,21 @@ Training `pos_err_mm` converged at ~11.4 mm by 4.6M steps (plateau; final 400k s
 ### Rigorous multi-seed comparison (MLP vs Transformer at matched 5M steps)
 
 Moving-target RMSE is averaged over 10 random-walk seeds; circle/figure-8 are deterministic.
-Both MLP seeds were evaluated; transformer seed=1 result pending (TBD — training in progress).
+Both seeds evaluated for both architectures.
 
 | Model | Moving Target | Circle | Figure-8 |
 |-------|--------------|--------|----------|
 | IK (100 ms delay) | 48.6 ± 8.0 mm | 11.5 mm | 7.7 mm |
 | MLP 5M (mean, 2 seeds) | 19.6 mm | 7.9 mm | 6.7 mm |
-| **Transformer 5M (seed=42)** | **20.7 ± 3.1 mm** | **4.5 mm** | **5.0 mm** |
+| **Transformer 5M (mean, 2 seeds)** | **20.6 ± 3.3 mm** | **4.8 mm** | **4.8 mm** |
+
+Per-seed breakdown: transformer s42: MT=20.7±3.1 CI=4.5 F8=5.0; transformer s1: MT=20.5 CI=5.1 F8=4.5. Results are consistent across seeds.
 
 **Note on IK MT:** Single-seed eval gave 38.1 mm (seed=42); 10-seed mean is 48.6 ± 8.0 mm. The random-walk seed has large variance (σ=8 mm); single-seed comparisons for MT should be treated as approximate.
 
-**Periodic trajectory advantage is decisive at 5M steps:** transformer 4.5 mm vs MLP 7.9 mm on circle (−43%), 5.0 vs 6.7 mm on figure-8 (−25%). The structural prior pays off most where the pattern repeats and the delay compensation can be learned precisely.
+**Periodic trajectory advantage is decisive at 5M steps:** transformer 4.8 mm vs MLP 7.9 mm on circle (−39%), 4.8 vs 6.7 mm on figure-8 (−28%). The structural prior pays off most where the pattern repeats and the delay compensation can be learned precisely.
 
-**Random-walk is essentially tied:** 20.7 vs 19.6 mm — within each model's seed-to-seed noise.
+**Random-walk is essentially tied:** 20.6 vs 19.6 mm — within each model's seed-to-seed noise.
 
 ### Smoothness metrics
 
@@ -194,9 +196,9 @@ Computed over settled episode portion. `action_roughness` = mean |a_t − a_{t-1
 | Model | MT rough | CI rough | F8 rough | MT sat% | CI sat% | F8 sat% |
 |-------|---------|---------|---------|---------|---------|---------|
 | MLP 5M (2-seed mean) | 0.796 | 0.472 | 0.520 | 44.8% | 56.5% | 58.0% |
-| **Transformer 5M** | **0.614** | **0.279** | **0.292** | **28.9%** | **55.1%** | **45.2%** |
+| **Transformer 5M (2-seed mean)** | **0.624** | **0.242** | **0.233** | **28.0%** | **64.3%** | **55.8%** |
 
-Transformer produces 20–45% smoother joint commands across all trajectories. The paired-slot architecture apparently learns more deliberate, pre-planned corrections rather than reactive bang-bang impulses.
+Transformer produces 20–50% smoother joint commands on MT and F8. The paired-slot architecture learns more deliberate, pre-planned corrections rather than reactive bang-bang impulses.
 
 ### Out-of-distribution generalization
 
@@ -206,19 +208,19 @@ Four OOD scenarios, two categories. Traj-type one-hot is all-zeros at inference 
 
 | Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
 |---|---|---|---|
-| Square | 10.4 mm | 7.5 mm | **4.0 mm** |
-| Rectangle | 10.9 mm | 8.6 mm | **5.4 mm** |
+| Square | 10.4 mm | 7.5 mm | **4.2 mm** |
+| Rectangle | 10.9 mm | 8.6 mm | **5.1 mm** |
 
-Transformer is **47% better on square, 37% on rectangle**. Hard corners are where delay matters most: the fine lookahead sees the corner 100ms ahead and pre-steers.
+Transformer is **44% better on square, 41% on rectangle**. Hard corners are where delay matters most: the fine lookahead sees the corner 100ms ahead and pre-steers.
 
 **OOD task conditions** (different speed / trajectory structure):
 
 | Trajectory | IK | MLP 5M (mean, 2 seeds) | **Transformer 5M** |
 |---|---|---|---|
-| Fast circle (2× training speed) | 31.1 mm | 11.1 mm | **9.6 mm** |
-| Step target (random waypoints, 10 seeds) | 61.2 ± 12.5 mm | 40.3 ± 10.7 mm | **41.6 ± 12.5 mm** |
+| Fast circle (2× training speed) | 31.1 mm | 11.1 mm | **8.9 mm** |
+| Step target (random waypoints, 10 seeds) | 61.2 ± 12.5 mm | 40.3 ± 10.7 mm | **41.0 ± 11.8 mm** |
 
-Fast circle (period 2–4s vs training 4–8s): transformer wins by 13%. The delay compensation generalises to higher speeds.
+Fast circle (period 2–4s vs training 4–8s): transformer wins by 20%. The delay compensation generalises to higher speeds.
 
 **Step target: both models are essentially tied.** StepTarget is stochastic — each seed generates a different random waypoint sequence — so the relevant metric is the mean ± std over multiple seeds, not a single roll. At σ≈11 mm the 41.6 vs 40.3 mm difference is well within noise. Both reduce the IK error by ~32–36%; neither architecture has a structural advantage here.
 
