@@ -2,6 +2,8 @@
 
 7-DoF Franka Panda end-effector tracking in MuJoCo, trained with residual PPO on top of a damped-least-squares IK baseline. The core challenge is a **5-step (100 ms) whole-pipeline command delay** that causes reactive controllers to systematically lag the target. A transformer policy with delay-aware observations learns predictive corrections the IK cannot make.
 
+📝 **[Blog post: Teaching a Robot Arm to See 100ms Into the Future](https://isaac0804.github.io/posts/2026-05-26-franka-ee-tracking/)**
+
 ![Tracking animation](results/figures/tracking_3d_circle.gif)
 
 ---
