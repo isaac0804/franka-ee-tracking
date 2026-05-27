@@ -173,9 +173,10 @@ def make_animation(model_path: str, trajectory: str,
         ], loc="lower center", ncol=3, fontsize=9,
            bbox_to_anchor=(0.38, -0.02), frameon=False)
 
+        fig.subplots_adjust(top=0.88)
         fig.suptitle(
             f"Franka EE Tracking — {trajectory.replace('_',' ').title()}",
-            fontsize=12, fontweight="bold", y=1.01)
+            fontsize=12, fontweight="bold", y=0.97)
 
         # ── capture frame ─────────────────────────────────────────────────
         fig.canvas.draw()
